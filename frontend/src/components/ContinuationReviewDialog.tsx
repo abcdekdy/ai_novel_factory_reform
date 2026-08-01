@@ -46,6 +46,7 @@ export default function ContinuationReviewDialog({ outline, onClose }: Props) {
     try {
       await api.confirmContinuation({
         outline: {
+          ...outline,
           chapters,
           consistency_rules: consistencyRules,
         },

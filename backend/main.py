@@ -2,9 +2,16 @@
 AI 小说工厂 - FastAPI 后端入口
 启动: uvicorn main:app --reload --port 8765
 """
+import sys
+import io
 import logging
 import traceback
 from contextlib import asynccontextmanager
+
+# 强制 UTF-8 输出，防止 Windows 下管道编码不匹配导致终端中文乱码（锟斤拷）
+if hasattr(sys.stdout, 'buffer') and sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

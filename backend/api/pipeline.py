@@ -248,6 +248,51 @@ async def stop_pipeline():
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/retry-world-view")
+async def retry_world_view():
+    """重新生成世界观（审阅对话框调用）"""
+    try:
+        pipeline = _get_pipeline()
+        ok = pipeline.retry_world_view()
+        if not ok:
+            raise HTTPException(status_code=400, detail="无法重试世界观：缺少灵感输入")
+        return {"ok": True, "message": "世界观重新生成中"}
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/retry-outline")
+async def retry_outline():
+    """重新生成大纲（审阅对话框调用）"""
+    try:
+        pipeline = _get_pipeline()
+        ok = pipeline.retry_outline()
+        if not ok:
+            raise HTTPException(status_code=400, detail="无法重试大纲：缺少世界观数据")
+        return {"ok": True, "message": "大纲重新生成中"}
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/retry")
+async def retry_pipeline():
+    """重试当前失败的阶段"""
+    try:
+        pipeline = _get_pipeline()
+        ok = pipeline.retry_current_stage()
+        if not ok:
+            raise HTTPException(status_code=400, detail="当前阶段不支持重试")
+        return {"ok": True, "message": "正在重试..."}
+    except HTTPException:
+        raise
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/status")
 async def pipeline_status():
     """获取当前流水线状态"""

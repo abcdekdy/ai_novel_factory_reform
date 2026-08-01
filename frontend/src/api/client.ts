@@ -59,6 +59,15 @@ export const api = {
   stopPipeline: () =>
     request<{ ok: boolean }>('/api/pipeline/stop', { method: 'POST' }),
 
+  retryWorldView: () =>
+    request<{ ok: boolean }>('/api/pipeline/retry-world-view', { method: 'POST' }),
+
+  retryOutline: () =>
+    request<{ ok: boolean }>('/api/pipeline/retry-outline', { method: 'POST' }),
+
+  retryPipeline: () =>
+    request<{ ok: boolean }>('/api/pipeline/retry', { method: 'POST' }),
+
   pipelineStatus: () =>
     request<{ is_running: boolean; current_stage: string; project_dir: string | null }>('/api/pipeline/status'),
 

@@ -145,6 +145,8 @@ export default function WorkspaceTab() {
   const pendingWorldView = useStore((s) => s.pendingWorldView)
   const pendingOutline = useStore((s) => s.pendingOutline)
   const pendingContinuationOutline = useStore((s) => s.pendingContinuationOutline)
+  const pipelineError = useStore((s) => s.pipelineError)
+  const setPipelineError = useStore((s) => s.setPipelineError)
 
   const logEndRef = useRef<HTMLDivElement>(null)
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null
@@ -165,6 +167,19 @@ export default function WorkspaceTab() {
       addLog({ source: 'Pipeline', message: `暂停失败: ${msg}` })
     }
   }, [addLog, setError])
+
+  // 重试当前失败阶段
+  const handleRetry = useCallback(async () => {
+    try {
+      setPipelineError(null)
+      await api.retryPipeline()
+      addLog({ source: 'Pipeline', message: '正在重试失败阶段...' })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : '重试失败'
+      setError(msg)
+      addLog({ source: 'Pipeline', message: `重试失败: ${msg}` })
+    }
+  }, [addLog, setError, setPipelineError])
 
   // 强制停止流水线
   const handleStop = useCallback(async () => {
@@ -363,6 +378,37 @@ export default function WorkspaceTab() {
               </div>
             </div>
           )
+        ) : pipelineError ? (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="space-y-2"
+          >
+            <div className="w-full py-3 rounded-apple-lg border border-apple-error/40
+              text-apple-error bg-apple-error/5
+              flex items-center justify-center gap-2 text-sm"
+            >
+              <AlertCircle size={16} />
+              <span>
+                {pipelineError.stage ? `[${pipelineError.stage}] ` : ''}
+                {pipelineError.message}
+              </span>
+            </div>
+            <motion.button
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              whileHover={{ scale: 1.01 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleRetry}
+              className="w-full py-3 rounded-apple-lg border border-apple-blue/40
+                text-apple-blue font-medium
+                hover:bg-apple-blue/10 transition-colors
+                flex items-center justify-center gap-2"
+            >
+              <RefreshCw size={16} />
+              <span>重试当前阶段</span>
+            </motion.button>
+          </motion.div>
         ) : (
           <div className="text-center text-xs text-apple-text-muted py-3">
             流水线未运行

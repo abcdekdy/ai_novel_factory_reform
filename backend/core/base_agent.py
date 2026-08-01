@@ -4,7 +4,7 @@ Agent基类 - 定义统一接口和信号
 """
 
 from PyQt6.QtCore import QObject, pyqtSignal
-from core.llm_client import DeepSeekClient
+from core.llm_client import LLMClient
 
 
 class BaseAgent(QObject):
@@ -19,7 +19,7 @@ class BaseAgent(QObject):
     status_signal = pyqtSignal(str, str)     # (agent_name, status: idle/running/success/error)
     finished_signal = pyqtSignal(str, dict)  # (agent_name, result_dict)
 
-    def __init__(self, name: str, llm_client: DeepSeekClient):
+    def __init__(self, name: str, llm_client: LLMClient):
         super().__init__()
         self.name = name
         self.llm = llm_client

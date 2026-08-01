@@ -13,9 +13,10 @@ CONFIG_FILE = Path(__file__).parent.parent / "config.json"
 # 默认配置
 DEFAULT_CONFIG = {
     "api_key": "",
-    "provider": "longcat",               # longcat | deepseek
-    "model": "LongCat-2.0",              # 默认模型名
-    "base_url": "https://api.longcat.chat/anthropic",  # LongCat接入点
+    # 所有服务均按 Anthropic Messages API 协议调用。用户在界面中填写
+    # 服务根地址（客户端会请求 <base_url>/v1/messages）和模型名称。
+    "model": "",
+    "base_url": "",
     "temperature": 0.8,
     "max_tokens": 4096,
     "concurrency": 3,           # 章节并行生成并发数
@@ -39,6 +40,8 @@ def load_config() -> dict:
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
+            # 旧版本的厂商选择不再参与运行；下一次保存配置时会自然移除。
+            saved.pop("provider", None)
             # 合并默认配置（兼容新增字段）
             config = {**DEFAULT_CONFIG, **saved}
             return config

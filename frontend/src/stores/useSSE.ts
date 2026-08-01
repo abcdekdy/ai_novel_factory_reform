@@ -127,7 +127,11 @@ export function useSSE() {
         const data = JSON.parse(e.data)
         // 区分正常完成 / 错误 / 暂停
         if (data.error) {
-          useStore.setState({ error: data.error, isRunning: false })
+          useStore.setState({
+            error: data.error,
+            isRunning: false,
+            pipelineError: { stage: data.stage || '', message: data.error },
+          })
           addLog({ source: 'Pipeline', message: `错误: ${data.error}` })
         } else if (data.paused) {
           useStore.setState({ isRunning: false, currentStage: 'idle' })
@@ -144,7 +148,11 @@ export function useSSE() {
     es.addEventListener('pipeline_error', (e) => {
       try {
         const data = JSON.parse(e.data)
-        useStore.setState({ error: data.error, isRunning: false })
+        useStore.setState({
+          error: data.error,
+          isRunning: false,
+          pipelineError: { stage: data.stage || '', message: data.error },
+        })
         addLog({ source: 'Pipeline', message: `错误: ${data.error}` })
         // 将所有运行中的 Agent 标记为错误
         const agents = useStore.getState().agents

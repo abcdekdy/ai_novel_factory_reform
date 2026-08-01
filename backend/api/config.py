@@ -2,6 +2,7 @@
 配置管理 API
 """
 import logging
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 
@@ -29,6 +30,23 @@ async def get_config():
 async def update_config(body: dict):
     """更新配置"""
     config = load_config()
+    base_url = body.get("base_url")
+    if base_url is not None:
+        if not isinstance(base_url, str):
+            raise HTTPException(status_code=422, detail="Base URL 必须是字符串")
+        normalized_url = base_url.strip().rstrip("/")
+        if normalized_url:
+            parsed = urlparse(normalized_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise HTTPException(status_code=422, detail="Base URL 必须是有效的 HTTP(S) 地址")
+        body["base_url"] = normalized_url
+
+    model = body.get("model")
+    if model is not None:
+        if not isinstance(model, str):
+            raise HTTPException(status_code=422, detail="模型名称必须是字符串")
+        body["model"] = model.strip()
+
     # 只允许更新已知字段
     for key in body:
         if key in DEFAULT_CONFIG and key != "api_key":
@@ -54,9 +72,8 @@ async def test_connection():
     try:
         client = LLMClient(
             api_key=config["api_key"],
-            provider=config.get("provider", "longcat"),
             base_url=config.get("base_url"),
-            model=config.get("model", "LongCat-2.0"),
+            model=config.get("model"),
             timeout=30,
         )
         result = client.test_connection()

@@ -154,20 +154,26 @@ class NovelPipeline(QObject):
 
         self._outline_for_chapters = None     # 当前用于章节生成的大纲（可能是续写批次的）
 
+        # ---- 重试支持 ----
+        self._last_inspiration = None         # 保存灵感文本，供世界构建重试用
+        self._last_chapter_count = None       # 保存章节数
+        self._failed_stage = None             # 记录失败阶段名
+
     def initialize(self, api_key: str = None):
         """初始化LLM客户端"""
+        # 每次启动、恢复或续写前重新读取配置，使设置页保存后立即生效。
+        self.config = load_config()
         if api_key is None:
             api_key = self.config.get("api_key", "")
         self.llm = LLMClient(
             api_key=api_key,
-            provider=self.config.get("provider", "longcat"),
             base_url=self.config.get("base_url"),
-            model=self.config.get("model", "LongCat-2.0"),
+            model=self.config.get("model"),
             timeout=self.config.get("timeout", 300),
         )
         self.signals.log_signal.emit(
             "Pipeline",
-            f"LLM客户端初始化完成 | Provider: {self.llm.provider} | 模型: {self.llm.model}"
+            f"LLM客户端初始化完成 | Anthropic Messages API | 模型: {self.llm.model}"
         )
 
     def start(self, inspiration: str, chapter_count: int = None, chapter_length: int = None):
@@ -194,6 +200,8 @@ class NovelPipeline(QObject):
         self.adaptations = {}
         self._chapter_count = chapter_count
         self._chapter_length = chapter_length  # 保存供后续阶段使用
+        self._last_inspiration = inspiration    # 保存供重试用
+        self._last_chapter_count = chapter_count
         self._completed_chapters = 0
         self._chapter_results = {}
         self._chapter_completed_count = 0
@@ -308,6 +316,19 @@ class NovelPipeline(QObject):
                 return
 
             self.outline = result
+
+            # 大纲质量检测：检查是否有足够章节包含实际剧情
+            chapters = result.get("chapters", [])
+            meaningful = [
+                ch for ch in chapters
+                if isinstance(ch, dict) and len(str(ch.get("plot_detail", "")).strip()) >= 20
+            ]
+            if chapters and len(meaningful) < max(1, len(chapters) * 0.3):
+                # 少于30%章节有有效剧情 → 视为生成失败，允许重试
+                self._handle_error(
+                    f"大纲生成质量过低：{len(chapters)}章中仅{len(meaningful)}章包含有效剧情，"
+                    f"建议重试")
+                return
 
             # 保存大纲到项目目录
             if self.project_dir:
@@ -1074,7 +1095,8 @@ class NovelPipeline(QObject):
         return True
 
     def _handle_error(self, message: str):
-        """处理错误"""
+        """处理错误（记录失败阶段供重试用）"""
+        self._failed_stage = self.current_stage
         self.is_running = False
         self.signals.stage_error.emit(self.current_stage, message)
         self.signals.log_signal.emit("Pipeline", f"❌ {message}")
@@ -1084,6 +1106,58 @@ class NovelPipeline(QObject):
         """停止流水线（尽力而为）"""
         self.is_running = False
         self.signals.log_signal.emit("Pipeline", "⏹ 流水线已手动停止")
+
+    # ===== 阶段重试 =====
+
+    def retry_world_view(self):
+        """重新生成世界观（从审阅对话框或错误状态调用）"""
+        if not self._last_inspiration:
+            self.signals.log_signal.emit("Pipeline", "⚠️ 无法重试：缺少灵感输入")
+            return False
+        self._pending_world_view = None
+        self._world_view_reviewing = False
+        self._failed_stage = None
+        self.is_running = True
+        self.signals.log_signal.emit("Pipeline", "🔄 重新生成世界观...")
+        import threading
+        self._pipeline_thread = threading.Thread(
+            target=self._build_world_view,
+            args=(self._last_inspiration, self._last_chapter_count or 5),
+            daemon=True,
+        )
+        self._pipeline_thread.start()
+        return True
+
+    def retry_outline(self):
+        """重新生成大纲（从审阅对话框或错误状态调用）"""
+        if not self.world_view:
+            self.signals.log_signal.emit("Pipeline", "⚠️ 无法重试：缺少世界观数据")
+            return False
+        self._pending_outline = None
+        self._outline_reviewing = False
+        self._failed_stage = None
+        self.is_running = True
+        self.signals.log_signal.emit("Pipeline", "🔄 重新生成大纲...")
+        import threading
+        self._pipeline_thread = threading.Thread(
+            target=self._build_outline,
+            args=(self.world_view,),
+            daemon=True,
+        )
+        self._pipeline_thread.start()
+        return True
+
+    def retry_current_stage(self):
+        """重试当前失败的阶段（根据 _failed_stage 路由）"""
+        stage = self._failed_stage or self.current_stage
+        if stage in ("world_building",):
+            return self.retry_world_view()
+        elif stage in ("outline_generation",):
+            return self.retry_outline()
+        else:
+            self.signals.log_signal.emit(
+                "Pipeline", f"⚠️ 阶段 '{stage}' 不支持重试，请重新开始流水线")
+            return False
 
 
 
@@ -1347,28 +1421,37 @@ class NovelPipeline(QObject):
         )
         agent.log_signal.connect(lambda name, msg: self.signals.log_signal.emit(name, msg))
 
-        batch_outline = agent.run({
-            "legacy_package": legacy,
-            "guidance": guidance,
-            "batch_chapter_count": batch_chapter_count,
-        })
+        # 后台线程生成续写大纲，避免同步阻塞 HTTP 请求导致前端超时
+        def _generate_outline():
+            try:
+                batch_outline = agent.run({
+                    "legacy_package": legacy,
+                    "guidance": guidance,
+                    "batch_chapter_count": batch_chapter_count,
+                })
 
-        # 保存批次大纲
-        save_batch_outline(project_dir, self._continuation_batch, batch_outline)
-        self._continuation_outline = batch_outline
-        self._outline_for_chapters = batch_outline
+                # 保存批次大纲
+                save_batch_outline(project_dir, self._continuation_batch, batch_outline)
+                self._continuation_outline = batch_outline
+                self._outline_for_chapters = batch_outline
 
-        # 计算本批章节范围
-        batch_start = batch_outline.get("outline_meta", {}).get("chapter_start", 0)
-        batch_count = batch_outline.get("outline_meta", {}).get("total_chapters", 0)
-        self._continuation_new_indices = list(range(batch_start, batch_start + batch_count))
-        self._continuation_old_count = batch_start - 1
+                # 计算本批章节范围
+                batch_start = batch_outline.get("outline_meta", {}).get("chapter_start", 0)
+                batch_count = batch_outline.get("outline_meta", {}).get("total_chapters", 0)
+                self._continuation_new_indices = list(range(batch_start, batch_start + batch_count))
+                self._continuation_old_count = batch_start - 1
 
-        self.signals.continuation_outline_ready.emit(batch_outline)
-        self.signals.stage_completed.emit("续写大纲生成")
-        self.signals.log_signal.emit(
-            "Pipeline",
-            f"✅ 续写大纲生成完成：第 {batch_start}-{batch_start + batch_count - 1} 章 — 等待用户审阅")
+                self.signals.continuation_outline_ready.emit(batch_outline)
+                self.signals.stage_completed.emit("续写大纲生成")
+                self.signals.log_signal.emit(
+                    "Pipeline",
+                    f"✅ 续写大纲生成完成：第 {batch_start}-{batch_start + batch_count - 1} 章 — 等待用户审阅")
+            except Exception as e:
+                self._handle_error(f"续写大纲生成异常: {e}")
+
+        self._pipeline_thread = threading.Thread(
+            target=_generate_outline, daemon=True)
+        self._pipeline_thread.start()
 
     def _build_continuation_outline_context(self) -> dict:
         """构建供续写章节 agent 使用的大纲上下文"""
@@ -1483,6 +1566,23 @@ class NovelPipeline(QObject):
             self.signals.log_signal.emit("Pipeline", "⚠️ 流水线已停止，无法启动章节生成")
             return
 
+        # 兜底：审阅回传可能丢失 outline_meta（含章节范围），从已落盘的批次大纲恢复，
+        # 否则后续 _generate_continuation_chapters 直接下标访问会抛 KeyError
+        if not isinstance(reviewed_outline.get("outline_meta"), dict):
+            saved = load_batch_outline(self.project_dir, self._continuation_batch)
+            if isinstance(saved, dict) and isinstance(saved.get("outline_meta"), dict):
+                reviewed_outline["outline_meta"] = saved.get("outline_meta")
+
+        # 磁盘文件可能也被覆盖/损坏，依据已记录的本批章节范围重建
+        if not isinstance(reviewed_outline.get("outline_meta"), dict):
+            ch_count = len(reviewed_outline.get("chapters", []))
+            batch_start = getattr(self, "_continuation_old_count", 0) + 1
+            reviewed_outline["outline_meta"] = {
+                "chapter_start": batch_start,
+                "chapter_end": batch_start + max(ch_count - 1, 0),
+                "total_chapters": ch_count,
+            }
+
         self._continuation_outline = reviewed_outline
         self._outline_for_chapters = reviewed_outline
         save_batch_outline(
@@ -1509,8 +1609,9 @@ class NovelPipeline(QObject):
         self.current_stage = "chapter_generation"
         self.signals.stage_started.emit("章节生成")
 
-        batch_start = outline.get("outline_meta", {}).get("chapter_start", 1)
-        chapter_count = outline["outline_meta"].get("total_chapters", 0)
+        meta = outline.get("outline_meta") or {}
+        batch_start = meta.get("chapter_start", 1)
+        chapter_count = meta.get("total_chapters", 0)
         existing_count = batch_start - 1
 
         self.signals.log_signal.emit(

@@ -3,6 +3,9 @@ setlocal
 
 title AI Novel Factory - Dev
 
+rem 切换控制台代码页为 UTF-8，避免 Python/Electron 输出的中文乱码
+chcp 65001 >nul
+
 set "PROJECT=%~dp0"
 if "%PROJECT:~-1%"=="\" set "PROJECT=%PROJECT:~0,-1%"
 

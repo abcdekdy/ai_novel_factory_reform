@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, FileText, ShieldCheck, Save, Sparkles, ListOrdered } from 'lucide-react'
+import { X, FileText, ShieldCheck, Save, Sparkles, ListOrdered, RefreshCw } from 'lucide-react'
 import { api } from '../api/client'
 import type { Outline, OutlineChapter } from '../types'
 
@@ -28,6 +28,7 @@ export default function OutlineReviewDialog({ outline, onClose }: Props) {
   const consistencyRules = outline.consistency_rules ?? []
   const characterArcs = outline.character_arcs ?? {}
   const [saving, setSaving] = useState(false)
+  const [regenerating, setRegenerating] = useState(false)
 
   // ESC 关闭
   useEffect(() => {
@@ -40,6 +41,18 @@ export default function OutlineReviewDialog({ outline, onClose }: Props) {
 
   const updateChapter = (idx: number, field: keyof OutlineChapter, value: string) => {
     setChapters(prev => prev.map((ch, i) => (i === idx ? { ...ch, [field]: value } : ch)))
+  }
+
+  const handleRegenerate = async () => {
+    setRegenerating(true)
+    try {
+      await api.retryOutline()
+      onClose()
+    } catch (err) {
+      console.error('重新生成大纲失败:', err)
+      alert(err instanceof Error ? err.message : '重新生成失败')
+      setRegenerating(false)
+    }
   }
 
   const handleConfirm = async () => {
@@ -176,21 +189,31 @@ export default function OutlineReviewDialog({ outline, onClose }: Props) {
           </div>
 
           {/* 底部按钮 */}
-          <div className="sticky bottom-0 flex items-center justify-end gap-3 border-t border-gray-200 bg-white/90 px-6 py-4 backdrop-blur supports-[backdrop-filter]:bg-white/80">
+          <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-gray-200 bg-white/90 px-6 py-4 backdrop-blur supports-[backdrop-filter]:bg-white/80">
             <button
               onClick={onClose}
               className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 active:scale-[0.98]"
             >
               取消
             </button>
-            <button
-              onClick={handleConfirm}
-              disabled={saving}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-500 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-blue-600 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <Save className="h-4 w-4" />
-              {saving ? '保存中…' : '确认并开始生成'}
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleRegenerate}
+                disabled={regenerating || saving}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 transition-colors hover:bg-amber-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <RefreshCw className={`h-4 w-4 ${regenerating ? 'animate-spin' : ''}`} />
+                {regenerating ? '生成中…' : '重新生成'}
+              </button>
+              <button
+                onClick={handleConfirm}
+                disabled={saving || regenerating}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-500 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-blue-600 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Save className="h-4 w-4" />
+                {saving ? '保存中…' : '确认并开始生成'}
+              </button>
+            </div>
           </div>
         </motion.div>
       </motion.div>

@@ -67,10 +67,20 @@ export default function PreviewTab() {
     setExporting(format)
     setError(null)
     try {
-      if (format === 'txt') {
-        await api.exportTxt(currentProject.name)
+      const res = format === 'txt'
+        ? await api.exportTxt(currentProject.name)
+        : await api.exportMarkdown(currentProject.name)
+
+      // 用系统默认程序打开导出的文件（Electron 环境）
+      const electronApi = window.electronAPI
+      if (electronApi?.openPath) {
+        const result = await electronApi.openPath(res.path)
+        if (result?.ok === false) {
+          setError(`导出成功，但打开文件失败: ${result.message || ''}（文件位置: ${res.path}）`)
+        }
       } else {
-        await api.exportMarkdown(currentProject.name)
+        // 非 Electron 环境（浏览器调试）：提示文件位置
+        setError(`已导出到: ${res.path}`)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '导出失败')

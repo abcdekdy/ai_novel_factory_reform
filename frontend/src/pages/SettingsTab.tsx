@@ -12,12 +12,11 @@ import {
   Loader2,
   Eye,
   EyeOff,
-  AlertCircle,
   ShieldCheck,
+  Info,
 } from 'lucide-react'
 
 interface ConfigState {
-  provider: string
   api_key: string
   api_key_set: boolean
   api_key_masked: string
@@ -34,7 +33,7 @@ interface ConfigState {
 }
 
 const DEFAULT_CONFIG: Partial<ConfigState> = {
-  provider: 'longcat',
+  api_key: '',
   base_url: '',
   model: 'LongCat-2.0',
   temperature: 0.7,
@@ -79,7 +78,6 @@ export default function SettingsTab() {
     try {
       const data = await api.getConfig()
       setConfig({
-        provider: (data.provider as string) || DEFAULT_CONFIG.provider!,
         api_key: '',
         api_key_set: (data.api_key_set as boolean) || false,
         api_key_masked: (data.api_key_masked as string) || '',
@@ -108,7 +106,6 @@ export default function SettingsTab() {
     try {
       // 只发送有值的字段，api_key 只在非空时发送
       const payload: Record<string, unknown> = {
-        provider: config.provider,
         base_url: config.base_url,
         model: config.model,
         temperature: config.temperature,
@@ -142,7 +139,6 @@ export default function SettingsTab() {
     try {
       // 先保存当前配置（确保测试用的是最新 key）
       const payload: Record<string, unknown> = {
-        provider: config.provider,
         base_url: config.base_url,
         model: config.model,
       }
@@ -191,26 +187,14 @@ export default function SettingsTab() {
         <motion.section variants={item} className="glass-card rounded-apple-lg p-6 space-y-4">
           <h2 className="text-base font-semibold text-apple-text flex items-center gap-2">
             <Key size={16} className="text-apple-blue" />
-            API 配置
+            Anthropic 接口配置
           </h2>
 
-          {/* Provider */}
-          <div>
-            <label className="block text-sm text-apple-text-secondary mb-1.5">服务商</label>
-            <div className="flex gap-2">
-              {['longcat', 'deepseek'].map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setConfig({ ...config, provider: p })}
-                  className={`px-4 py-2 rounded-apple text-sm font-medium transition-all ${
-                    config.provider === p
-                      ? 'bg-apple-blue text-white shadow-apple'
-                      : 'glass-inset text-apple-text-secondary hover:text-apple-text'
-                  }`}
-                >
-                  {p === 'longcat' ? 'LongCat' : 'DeepSeek'}
-                </button>
-              ))}
+          <div className="flex gap-3 rounded-apple bg-apple-blue/5 px-3.5 py-3 text-sm text-apple-text-secondary">
+            <Info size={16} className="mt-0.5 shrink-0 text-apple-blue" />
+            <div className="space-y-1">
+              <p className="font-medium text-apple-text">统一使用 Anthropic Messages API</p>
+              <p>请填写兼容该协议的服务根地址、API Key 和模型名称。系统会调用 <code className="rounded bg-apple-blue/10 px-1 py-0.5 text-xs text-apple-text">/v1/messages</code>。</p>
             </div>
           </div>
 
@@ -244,23 +228,25 @@ export default function SettingsTab() {
 
           {/* Base URL */}
           <div>
-            <label className="block text-sm text-apple-text-secondary mb-1.5">Base URL（可选）</label>
+            <label className="block text-sm text-apple-text-secondary mb-1.5">Base URL</label>
             <input
               type="text"
               value={config.base_url}
               onChange={(e) => setConfig({ ...config, base_url: e.target.value })}
-              placeholder="https://api.example.com/v1"
+              placeholder="https://api.example.com"
               className="w-full px-4 py-2.5 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
             />
+            <p className="mt-1.5 text-xs text-apple-text-muted">填写服务根地址；不要附加 <code>/v1/messages</code>。</p>
           </div>
 
           {/* Model */}
           <div>
-            <label className="block text-sm text-apple-text-secondary mb-1.5">模型</label>
+            <label className="block text-sm text-apple-text-secondary mb-1.5">模型名称</label>
             <input
               type="text"
               value={config.model}
               onChange={(e) => setConfig({ ...config, model: e.target.value })}
+              placeholder="填写服务商提供的模型 ID"
               className="w-full px-4 py-2.5 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
             />
           </div>
@@ -269,7 +255,7 @@ export default function SettingsTab() {
           <div className="flex items-center gap-3">
             <button
               onClick={handleTest}
-              disabled={testing || (!config.api_key && !config.api_key_set)}
+              disabled={testing || (!config.api_key && !config.api_key_set) || !config.base_url.trim() || !config.model.trim()}
               className="px-4 py-2 rounded-apple bg-apple-blue/10 text-apple-blue text-sm font-medium hover:bg-apple-blue/20 transition-colors disabled:opacity-50 flex items-center gap-2"
             >
               {testing ? <Loader2 size={14} className="animate-spin" /> : <Zap size={14} />}

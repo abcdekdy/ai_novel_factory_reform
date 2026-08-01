@@ -3,6 +3,10 @@
   "version": "2.0.0",
   "description": "AI 小说工厂 - Electron + React + FastAPI 重构版",
   "main": "electron/main.js",
+  "config": {
+    "electron_mirror": "https://npmmirror.com/mirrors/electron/",
+    "electron_builder_binaries_mirror": "https://npmmirror.com/mirrors/electron-builder-binaries/"
+  },
   "scripts": {
     "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\" \"npm run dev:electron\"",
     "dev:backend": "cd backend && uvicorn main:app --reload --port 8765",

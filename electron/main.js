@@ -2,7 +2,7 @@
  * Electron 主进程
  * 启动 Python 后端子进程，创建应用窗口
  */
-const { app, BrowserWindow, Menu, Tray } = require('electron')
+const { app, BrowserWindow, Menu, Tray, ipcMain, shell } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const http = require('http')
@@ -44,6 +44,7 @@ async function startPythonBackend() {
   pythonProcess = spawn(pythonExe, ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)], {
     cwd: path.join(__dirname, '..', 'backend'),
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
   })
 
   pythonProcess.stdout.on('data', (data) => {
@@ -122,6 +123,34 @@ function killProcessOnPort(port) {
     // 端口未被占用或命令失败
   }
 }
+
+// ===== IPC — 导出文件操作 =====
+
+ipcMain.handle('open-path', async (event, filePath) => {
+  // 用系统默认程序打开文件（导出 txt/md 后用）
+  if (!filePath || typeof filePath !== 'string') {
+    return { ok: false, message: '无效的文件路径' }
+  }
+  try {
+    const result = await shell.openPath(filePath)
+    return result ? { ok: false, message: result } : { ok: true }
+  } catch (e) {
+    return { ok: false, message: String(e) }
+  }
+})
+
+ipcMain.handle('show-in-folder', async (event, filePath) => {
+  // 在文件管理器中显示文件
+  if (!filePath || typeof filePath !== 'string') {
+    return { ok: false, message: '无效的文件路径' }
+  }
+  try {
+    shell.showItemInFolder(filePath)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, message: String(e) }
+  }
+})
 
 // ===== 窗口管理 =====
 

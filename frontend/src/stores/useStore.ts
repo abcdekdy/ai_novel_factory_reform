@@ -58,6 +58,8 @@ interface AppState {
   // 错误
   error: string | null
   setError: (err: string | null) => void
+  pipelineError: { stage: string; message: string } | null
+  setPipelineError: (err: { stage: string; message: string } | null) => void
 
   // 续写
   pendingContinuationOutline: Outline | null
@@ -117,6 +119,7 @@ export const useStore = create<AppState>((set, get) => ({
     pendingOutline: null,
     pendingContinuationOutline: null,
     error: null,
+    pipelineError: null,
   }),
 
   currentProject: null,
@@ -144,6 +147,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   error: null,
   setError: (err) => set({ error: err }),
+  pipelineError: null,
+  setPipelineError: (err) => set({ pipelineError: err }),
 
   pendingContinuationOutline: null,
   setPendingContinuationOutline: (o) => set({ pendingContinuationOutline: o }),

@@ -13,7 +13,7 @@ from core.project_manager import (
     load_project_summary,
     load_world_view,
     load_outline,
-    load_all_chapters_map,
+    load_all_chapters,
     export_to_txt,
     export_to_markdown,
     list_batch_outlines,
@@ -68,11 +68,14 @@ async def get_outline(project_name: str):
 
 @router.get("/{project_name:path}/chapters")
 async def get_chapters(project_name: str):
-    """获取所有章节"""
+    """获取所有章节（返回按章节号排序的数组）"""
     project_dir = _resolve_project_dir(project_name)
     if not project_dir:
         raise HTTPException(status_code=404, detail="项目不存在")
-    return load_all_chapters_map(project_dir)
+    chapters = load_all_chapters(project_dir)
+    chapters.sort(
+        key=lambda c: c.get("chapter_index", c.get("chapter", 0)))
+    return chapters
 
 
 @router.get("/{project_name:path}/batches")
@@ -136,7 +139,7 @@ async def export_txt(project_name: str):
         output.mkdir(exist_ok=True)
         output_path = output / f"{project_name}.txt"
         export_to_txt(project_dir, str(output_path))
-        return {"ok": True, "path": str(output_path)}
+        return {"ok": True, "path": str(output_path), "filename": f"{project_name}.txt"}
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 
@@ -152,7 +155,7 @@ async def export_markdown(project_name: str):
         output.mkdir(exist_ok=True)
         output_path = output / f"{project_name}.md"
         export_to_markdown(project_dir, str(output_path))
-        return {"ok": True, "path": str(output_path)}
+        return {"ok": True, "path": str(output_path), "filename": f"{project_name}.md"}
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 

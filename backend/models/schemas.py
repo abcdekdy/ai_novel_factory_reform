@@ -32,7 +32,6 @@ class ConfirmContinuationRequest(BaseModel):
 
 class ConfigUpdateRequest(BaseModel):
     api_key: Optional[str] = None
-    provider: Optional[str] = None
     model: Optional[str] = None
     base_url: Optional[str] = None
     temperature: Optional[float] = None
