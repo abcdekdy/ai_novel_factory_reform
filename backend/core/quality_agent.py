@@ -125,7 +125,7 @@ class QualityEvaluatorAgent(BaseAgent):
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.3,  # 评估任务用较低温度保证一致性
-                max_tokens=8192,  # 评估也处理完整章节，需要足够预算
+                max_tokens=6144,  # 评估输出 JSON（6 维评分+issues+highlights），6k 足够
             )
 
             self.set_progress(80)

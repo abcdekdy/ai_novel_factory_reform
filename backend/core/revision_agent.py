@@ -175,7 +175,7 @@ class RevisionAgent(BaseAgent):
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 temperature=0.5,
-                max_tokens=16384,  # 高预算：确保思考 + 响应都有足够空间
+                max_tokens=8192,  # 修订输出是 patch JSON，8k 足够，降低思考时长
             )
 
             self.set_progress(80)

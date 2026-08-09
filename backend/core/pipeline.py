@@ -577,17 +577,9 @@ class NovelPipeline(QObject):
                     passed.append(chapter_index)
                     self.signals.chapter_progress.emit(chapter_index, 100, "评估通过")
                 else:
-                    # 仅字数类问题（且 LLM 未挑出其他问题）：patch 修订只能
+                    # 仅字数 hard 硬伤（且 LLM 未挑出非字数问题）：patch 只能
                     # 局部修改，无法改变篇幅，进修订循环只会空转 3 轮 → 跳过
-                    rule_issues = evaluation.get("rule_issues", [])
-                    llm_issues = [
-                        i for i in evaluation.get("issues", [])
-                        if i.get("source") != "rule_checker"
-                    ]
-                    only_word_count = (
-                        rule_issues and not llm_issues
-                        and all(i.get("type") == "word_count" for i in rule_issues)
-                    )
+                    only_word_count = NovelPipeline._only_word_count_hard(evaluation)
                     if only_word_count:
                         self.signals.log_signal.emit(
                             "Pipeline",
@@ -689,6 +681,36 @@ class NovelPipeline(QObject):
             })
 
         return new_content, applied, failed, log_entries
+
+    @staticmethod
+    def _has_word_count_hard(evaluation: dict) -> bool:
+        """评估结果中是否存在"字数 hard 硬伤"（patch 局部修订无法修复篇幅）。"""
+        for i in evaluation.get("rule_issues", []):
+            if i.get("severity") == "hard" and i.get("type") == "word_count":
+                return True
+        return False
+
+    @staticmethod
+    def _only_word_count_hard(evaluation: dict) -> bool:
+        """是否仅存在字数 hard 硬伤、无其他需修订的问题（应直接跳过修订循环）。
+
+        注意：字数硬伤一旦存在，QualityEvaluatorAgent 会因 hard_count>0 强制
+        pass=False，而 patch 修订又无法改变篇幅——进修订循环只会空转轮次。
+        因此只要"非字数类问题"为空，就跳过；仅当 LLM 挑出实质性问题时才进
+        修订队列（且修订轮内会限制轮数，见 _revise_worker）。
+        """
+        if not NovelPipeline._has_word_count_hard(evaluation):
+            return False
+        # 存在非字数的 hard 硬伤（如禁用句式）→ 仍需修订
+        for i in evaluation.get("rule_issues", []):
+            if i.get("severity") == "hard" and i.get("type") != "word_count":
+                return False
+        # LLM 提出过非字数类问题 → 仍需修订
+        llm_issues = [
+            i for i in evaluation.get("issues", [])
+            if i.get("source") != "rule_checker"
+        ]
+        return not llm_issues
 
     def _apply_revision_result(self, content: str, result: dict,
                                chapter_index: int, round_num: int) -> tuple:
@@ -862,9 +884,16 @@ class NovelPipeline(QObject):
                             self.signals.log_signal.emit(
                                 "Pipeline",
                                 f"第{chapter_index}章修订后通过！")
-                        elif new_score <= prev_score + 0.3:
-                            # 收敛判断：修订后分数无实质提升 → 修订已停滞，
-                            # 继续只会空转轮次，提前停止
+                        elif NovelPipeline._has_word_count_hard(new_eval):
+                            # 字数硬伤 patch 修不了篇幅，继续只会空转轮次 → 停止
+                            self.signals.log_signal.emit(
+                                "Pipeline",
+                                f"第{chapter_index}章修订后仍存在字数硬伤"
+                                f"（patch 无法修复篇幅），停止修订")
+                        elif (result.get("applied_count", 0) == 0
+                              or new_score <= prev_score + 0.5):
+                            # 收敛判断：本轮 patch 一个都没命中（改了等于没改），
+                            # 或修订后分数无实质提升 → 修订已停滞，提前停止
                             self.signals.log_signal.emit(
                                 "Pipeline",
                                 f"第{chapter_index}章修订后分数无提升"

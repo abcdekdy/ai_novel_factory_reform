@@ -70,6 +70,10 @@ class ChapterGeneratorAgent(BaseAgent):
         chapter_index = input_data.get("chapter_index", 1)
         target_length = input_data.get("target_length", 3000)
         on_chunk = input_data.get("callback", None)
+        # 字数硬性范围：rule_checker 的 hard 阈值是 ±30%，这里用 ±10% 强约束
+        # 引导模型一次达标，避免进修订循环空转
+        min_len = int(target_length * 0.9)
+        max_len = int(target_length * 1.1)
 
         # ---- 详细大纲字段（新增） ----
         outline_ch = input_data.get("outline_chapter", {})
@@ -149,7 +153,7 @@ class ChapterGeneratorAgent(BaseAgent):
 
 【写作要求】
 - 章节标题已在大纲中，正文从第一段开始写即可
-- 目标字数：{target_length}字左右
+- **字数硬性要求（最优先）：正文必须达到 {target_length} 字左右，允许误差 ±10%，即 {min_len}-{max_len} 字之间。写完请自查实际字数：不足则补充情节与描写细节，超出则删减冗余，务必一次达标。**
 - 详细剧情中的关键事件**必须全部覆盖**，不要遗漏
 - 大胆遵循伏笔提示，为后续剧情做铺垫
 - 章尾必须呼应悬念设计，吸引读者继续阅读
@@ -165,7 +169,7 @@ class ChapterGeneratorAgent(BaseAgent):
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     temperature=0.8,
-                    max_tokens=6000,
+                    max_tokens=max(6000, int(target_length * 2)),
                     on_chunk=on_chunk,
                     on_complete=lambda full: self.log(f"第{chapter_index}章生成完成，共 {len(full)} 字")
                 )
@@ -174,7 +178,7 @@ class ChapterGeneratorAgent(BaseAgent):
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=user_prompt,
                     temperature=0.8,
-                    max_tokens=6000
+                    max_tokens=max(6000, int(target_length * 2))
                 )
 
             self.set_progress(100)
