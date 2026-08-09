@@ -106,6 +106,8 @@ backend/         — FastAPI + Python 核心
 - **patch 协议**：RevisionAgent 输出 `[{anchor, replacement, reason}]`，精确匹配 + fuzzy 匹配（忽略空白/全半角标点）
 - **命中率阈值**：patch 命中 <50% 时回退到全文重写模式
 - **最大轮数**：`max_revision_rounds`（默认 3），每轮修订后重跑评估
+- **字数硬伤跳过**：仅字数 hard 硬伤（无其他问题）的章节直接跳过修订循环（patch 修不了篇幅）；修订轮内重评后仍存在字数硬伤 → 立即停止，不再空转轮次
+- **收敛判断**：修订后分数提升 <0.5，或本轮 patch 零命中 → 判定收敛停止
 - **手动编辑保护**：章节标记 `manually_edited` 后修订循环跳过该章节
 
 ### 续写/恢复模式
@@ -239,6 +241,19 @@ backend/         — FastAPI + Python 核心
     - 问题：确认续写大纲后立即 `pipeline_error` + `pipeline_finished`，且"重试当前阶段"返回 400。根因是 `ContinuationReviewDialog` 确认时只回传 `{chapters, consistency_rules}`，丢了 `outline_meta`；后端 `_generate_continuation_chapters` 用 `outline["outline_meta"]` 直接下标访问抛 `KeyError`，同时 `save_batch_outline` 把被剥离的（无 `outline_meta`）大纲覆盖落盘
     - 修复：① 续写审阅对话框回传改为 `{...outline, chapters, consistency_rules}` 保留 `outline_meta`（与 `OutlineReviewDialog` 一致）；② `confirm_continuation` 兜底恢复 `outline_meta`（先读磁盘批次大纲，再按 `_continuation_old_count` 重建）；③ `_generate_continuation_chapters` 改用 `outline.get("outline_meta") or {}` 安全访问
     - 文件：`frontend/src/components/ContinuationReviewDialog.tsx`、`backend/core/pipeline.py`
+
+### 2026-08-09 修复
+
+15. **回流修订空转满 3 轮（关键，token 浪费）**
+    - 问题：字数严重偏离（>30%）被 rule_checker 判为 hard → `quality_agent.py` 因 hard_count>0 强制 `pass=false`；但 patch 修订物理上改不了篇幅，而收敛判断依赖波动极大的两次独立 LLM 分数（阈值 +0.3）→ 字数不符的章节必然空转满 3 轮，每轮都重发完整章节+世界观上下文，大量烧 token 和时间
+    - 修复：① 新增 `_has_word_count_hard` / `_only_word_count_hard` 判定，仅字数硬伤章节在初始评估直接跳过修订；② 修订轮内重评后仍存在字数硬伤 → 立即停止；③ 本轮 patch 零命中 → 收敛停止；④ 分数提升阈值 +0.3 → +0.5
+    - 效果：实测 6 章中 4 章需修订，全部只修 1 轮即停，不再空转
+    - 文件：`backend/core/pipeline.py`
+
+16. **生成字数超写与 token 预算**
+    - 问题：章节生成模型系统性超写（目标 3000 字实际 3171~6371，第 6 章超 1 倍）；且修订/评估 max_tokens 预算过大，思考模型共享预算导致单次响应慢、偶发截断触发"响应为空提高预算重试"
+    - 修复：① 章节生成 prompt 强化目标字数硬约束（±10% + 写完自检）；② `max_tokens` 从固定 6000 改为 `max(6000, target_length*2)` 动态扩展；③ 评估 8192→6144、修订 16384→8192（字数偏差按正常现象接受，未做压缩校准）
+    - 文件：`backend/core/chapter_agent.py`、`backend/core/quality_agent.py`、`backend/core/revision_agent.py`
 
 ## 开发规范
 
