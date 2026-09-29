@@ -44,11 +44,36 @@ SYSTEM_PROMPT = """你是一位才华横溢的网文小说创作者，擅长根�
 
 
 class ChapterGeneratorAgent(BaseAgent):
-    """章节生成Agent - 可并行调用的章节生成器（携带详细大纲上下文）"""
+    """章节生成Agent - 可并行调用的章节生成器（携带详细大纲上下文）
 
-    def __init__(self, llm_client, agent_id: int = 0):
-        super().__init__(f"章节生成-{agent_id}", llm_client)
+    传入 `persona` 即成为竞稿模式下的一个"作者人格"：在通用创作规范之外，
+    额外注入该人格的风格要求，使同一章产生风格可辨的多个候选稿。
+    """
+
+    def __init__(self, llm_client, agent_id: int = 0,
+                 persona: dict | None = None):
+        label = f"章节生成-{agent_id}"
+        if persona and persona.get("name"):
+            label += f"[{persona['name']}]"
+        super().__init__(label, llm_client)
         self.agent_id = agent_id
+        self.persona = persona or None
+        self.system_prompt = self._build_system_prompt()
+
+    def _build_system_prompt(self) -> str:
+        """通用创作规范 + 可选的作者人格风格。"""
+        if not self.persona:
+            return SYSTEM_PROMPT
+        name = self.persona.get("name", "")
+        style = self.persona.get("style", "")
+        return SYSTEM_PROMPT + f"""
+
+## 本次创作风格（作者人格：{name}）
+
+{style}
+
+以上风格要求与前述创作规范同等重要：在满足大纲、字数硬性范围与一致性规则
+的前提下，让本章的语言质感、叙事节奏与描写偏好充分体现这一风格。"""
 
     def run(self, input_data: dict) -> dict:
         """
@@ -166,7 +191,7 @@ class ChapterGeneratorAgent(BaseAgent):
         try:
             if on_chunk:
                 content = self.llm.chat_stream(
-                    system_prompt=SYSTEM_PROMPT,
+                    system_prompt=self.system_prompt,
                     user_prompt=user_prompt,
                     temperature=0.8,
                     max_tokens=max(6000, int(target_length * 2)),
@@ -175,7 +200,7 @@ class ChapterGeneratorAgent(BaseAgent):
                 )
             else:
                 content = self.call_llm(
-                    system_prompt=SYSTEM_PROMPT,
+                    system_prompt=self.system_prompt,
                     user_prompt=user_prompt,
                     temperature=0.8,
                     max_tokens=max(6000, int(target_length * 2))

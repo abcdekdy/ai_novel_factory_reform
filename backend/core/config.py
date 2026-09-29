@@ -21,6 +21,8 @@ DEFAULT_CONFIG = {
     "max_tokens": 4096,
     "concurrency": 3,           # 章节并行生成并发数
     "max_revision_rounds": 3,   # 最大修订轮数
+    # patch 命中率 <50% 时是否允许整章重写兜底（关闭则保留原文，少花 token）
+    "enable_full_rewrite_fallback": True,
     "quality_threshold": 7.0,   # 质量评估通过阈值(满分10)
     "default_chapter_count": 5, # 默认章节数
     "default_chapter_length": 3000,  # 默认每章字数
@@ -31,6 +33,16 @@ DEFAULT_CONFIG = {
     "outline_temperature": 0.7,       # 大纲生成温度
     # ---- 网络超时 ----
     "timeout": 300,                   # LLM 单次调用超时秒数（续写大纲等长任务建议 ≥ 300）
+    # ---- 成本门禁 ----
+    # 累计花费达 80% 告警、达上限自动暂停（进度无损，调高上限后可续写）。
+    # 上限为 0 表示不限制。单价需用户按所用服务填写（美元 / 百万 token）。
+    "budget_max_cost_usd": 0.0,           # 成本上限（美元），0 = 不限制
+    "budget_price_input_per_mtok": 3.0,   # 输入单价（美元/百万 token）
+    "budget_price_output_per_mtok": 15.0, # 输出单价（美元/百万 token）
+    # ---- 多人格竞稿 ----
+    # 每行一个人格，格式「名称|风格描述」。配置 ≥2 个人格后，每章为每个人格
+    # 各写一稿，由 Judge 评分选优。留空则退回单 Writer 模式（不产生额外调用）。
+    "chapter_personas": "",
 }
 
 

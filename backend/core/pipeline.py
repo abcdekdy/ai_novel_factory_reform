@@ -18,6 +18,7 @@ from core.world_agent import WorldBuilderAgent
 from core.outline_agent import OutlineBuilderAgent
 from core.continuation_outline_agent import ContinuationOutlineAgent
 from core.chapter_agent import ChapterGeneratorAgent
+from core.judge_agent import JudgeAgent
 from core.quality_agent import QualityEvaluatorAgent
 from core.revision_agent import RevisionAgent
 from core.adapter_agent import PlatformAdapterAgent
@@ -136,6 +137,13 @@ class NovelPipeline(QObject):
         self._completed_chapters = 0
         self._pause_requested = False
         self._pending_chapter_workers = 0
+        self._budget_warned = False            # 成本门禁是否已发过 80% 告警
+        self._persona_failures = {}            # 人格连续失败计数（竞稿模式）
+        # 竞稿候选稿的全局并发闸门（按 concurrency 懒建，见 _contest_semaphore）。
+        # 必须在此静态初始化：QObject 子类上用 getattr 探测未定义属性会抛
+        # RuntimeError 而非 AttributeError，默认值兜不住。
+        self._persona_semaphore = None
+        self._persona_semaphore_size = 0
 
         # 修订循环状态
         self._revision_queue = []
@@ -171,9 +179,20 @@ class NovelPipeline(QObject):
             model=self.config.get("model"),
             timeout=self.config.get("timeout", 300),
         )
+        self.llm.configure_budget(
+            max_cost_usd=self.config.get("budget_max_cost_usd", 0.0),
+            price_input_per_mtok=self.config.get("budget_price_input_per_mtok", 3.0),
+            price_output_per_mtok=self.config.get("budget_price_output_per_mtok", 15.0),
+        )
+        self._budget_warned = False
+        self._persona_failures = {}
+        budget = self.llm.budget_status()
+        budget_hint = (f" | 成本上限 ${budget['limit_usd']:.2f}"
+                       if budget["limit_usd"] > 0 else " | 成本不限")
         self.signals.log_signal.emit(
             "Pipeline",
             f"LLM客户端初始化完成 | Anthropic Messages API | 模型: {self.llm.model}"
+            + budget_hint
         )
 
     def start(self, inspiration: str, chapter_count: int = None, chapter_length: int = None):
@@ -316,6 +335,7 @@ class NovelPipeline(QObject):
                 return
 
             self.outline = result
+            self._outline_for_chapters = result
 
             # 大纲质量检测：检查是否有足够章节包含实际剧情
             chapters = result.get("chapters", [])
@@ -371,6 +391,50 @@ class NovelPipeline(QObject):
         if outline and isinstance(outline.get("consistency_rules"), list):
             return list(outline.get("consistency_rules", []))
         return []
+
+    def _active_outline(self) -> dict | None:
+        """当前生效的详细大纲：续写场景为该批次大纲，否则为全书大纲。"""
+        return self._outline_for_chapters or self.outline
+
+    def _chapter_outline_for(self, chapter_index: int) -> dict:
+        """取某章的细粒度大纲条目（含 key_events / characters_present / cliffhanger）。
+
+        为什么必须收敛到这一个入口：初评与修订后的重评如果取到不同的大纲
+        （历史上初评用细大纲、重评用世界观阶段的粗大纲），两次打分依据不同、
+        分数不可比，收敛判断随即失真。
+
+        字段来源：粗大纲（WorldBuilderAgent）只有 title/summary，细大纲
+        （OutlineBuilderAgent）才有 key_events / characters_present，因此这里
+        做合并——粗大纲兜底基础字段，细大纲覆盖并补齐可校验字段。
+        """
+        outline = self._active_outline() or {}
+        chapters = outline.get("chapters", []) if isinstance(outline, dict) else []
+
+        fine: dict = {}
+        if isinstance(chapters, list):
+            for ch in chapters:
+                if isinstance(ch, dict) and ch.get("chapter_index") == chapter_index:
+                    fine = ch
+                    break
+            else:
+                # 回退：按位置匹配，但**仅当大纲确实是 1 基编号**时才允许。
+                # 续写批次大纲用的是绝对章号（如 11..15），按位置取会把第 11 章
+                # 的条目错配给第 1 章——正是这个错配让初评与重评依据不同。
+                first = chapters[0] if chapters else None
+                first_idx = first.get("chapter_index") if isinstance(first, dict) else None
+                if first_idx in (None, 1) and 1 <= chapter_index <= len(chapters):
+                    candidate = chapters[chapter_index - 1]
+                    if isinstance(candidate, dict):
+                        fine = candidate
+
+        coarse = self.world_view.get("chapter_outline", []) if self.world_view else []
+        coarse_entry: dict = {}
+        if isinstance(coarse, list) and 1 <= chapter_index <= len(coarse):
+            candidate = coarse[chapter_index - 1]
+            if isinstance(candidate, dict):
+                coarse_entry = candidate
+
+        return {**coarse_entry, **fine}
 
     def _build_outline_context(self) -> dict:
         """构建供章节生成使用的整体大纲上下文（一致性规则/全局弧线/全章概要）。"""
@@ -446,15 +510,153 @@ class NovelPipeline(QObject):
                 daemon=True,
             ).start()
 
+    def _active_personas(self) -> list[dict]:
+        """解析竞稿人格配置，并剔除连续失败过多者。
+
+        配置格式：每行一个人格「名称|风格描述」（`#` 开头的行为注释）。
+        返回空列表或单元素列表时走单 Writer 模式，不产生任何额外调用。
+        某人格连续失败 3 次即自动弃权，避免一个坏配置拖垮整本书的生成。
+        """
+        raw = self.config.get("chapter_personas") or ""
+        personas: list[dict] = []
+        seen: set = set()
+        for line in str(raw).splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            name, _, style = line.partition("|")
+            name, style = name.strip(), style.strip()
+            if name and style and name not in seen:
+                seen.add(name)
+                personas.append({"name": name, "style": style})
+
+        failures = getattr(self, "_persona_failures", None) or {}
+        return [p for p in personas if failures.get(p["name"], 0) < 3]
+
+    def _contest_semaphore(self) -> threading.Semaphore:
+        """竞稿候选稿的**全局**并发闸门。
+
+        章节级信号量只保证"同时处理几章"，而每章会派生 N 个候选请求，于是总
+        在途请求数是「并发章数 × 人格数」。这个闸门按 concurrency 单独限流候选
+        请求，使总在途数回到 concurrency 以内，避免把服务端打满。
+        """
+        size = max(1, int(self.config.get("concurrency", 3)))
+        if self._persona_semaphore_size != size or self._persona_semaphore is None:
+            self._persona_semaphore = threading.Semaphore(size)
+            self._persona_semaphore_size = size
+        return self._persona_semaphore
+
+    def _generate_chapter_with_contest(self, position: int, input_data: dict,
+                                       personas: list[dict]) -> dict:
+        """竞稿：每个人格各写一稿，Judge 评分选优，中选稿成为本章正稿。
+
+        候选稿并行，但受 `_contest_semaphore()` 全局限流（见其说明）。
+        """
+        contest_sem = self._contest_semaphore()
+        chapter_index = input_data.get("chapter_index", position + 1)
+        names = "、".join(p["name"] for p in personas)
+        self.signals.log_signal.emit(
+            "Pipeline", f"🏆 第{chapter_index}章竞稿：{len(personas)} 个人格并行创作（{names}）")
+
+        candidates: list[dict] = []
+        cand_lock = threading.Lock()
+
+        def _write(persona: dict):
+            name = persona["name"]
+            try:
+                agent = ChapterGeneratorAgent(
+                    self.llm, agent_id=position, persona=persona)
+                agent.log_signal.connect(
+                    lambda n, msg: self.signals.log_signal.emit(n, msg))
+                with contest_sem:
+                    result = agent.run(input_data)
+                content = result.get("content", "")
+                if result.get("status") == "error" or len(content) < 200:
+                    raise RuntimeError(result.get("error") or "候选稿内容过短")
+                with cand_lock:
+                    candidates.append({
+                        "persona": name,
+                        "content": content,
+                        "result": result,
+                    })
+                    self._persona_failures[name] = 0
+            except Exception as e:
+                with cand_lock:
+                    count = self._persona_failures.get(name, 0) + 1
+                    self._persona_failures[name] = count
+                self.signals.log_signal.emit(
+                    "Pipeline",
+                    f"⚠️ 第{chapter_index}章人格「{name}」候选稿失败"
+                    f"（连续 {count} 次）: {e}")
+
+        threads = [threading.Thread(target=_write, args=(p,), daemon=True)
+                   for p in personas]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # 全部人格都失败 → 降级为单 Writer，保证这一章仍能产出
+        if not candidates:
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"⚠️ 第{chapter_index}章全部人格候选稿失败，降级为单 Writer 模式")
+            agent = ChapterGeneratorAgent(self.llm, agent_id=position)
+            agent.log_signal.connect(
+                lambda name, msg: self.signals.log_signal.emit(name, msg))
+            return agent.run(input_data)
+
+        # 只有一稿时无需评审（省掉一次调用）
+        if len(candidates) == 1:
+            verdict = {"best_index": 0, "reason": "仅一稿，无需评选", "scores": []}
+        else:
+            judge = JudgeAgent(self.llm)
+            judge.log_signal.connect(
+                lambda name, msg: self.signals.log_signal.emit(name, msg))
+            verdict = judge.run({
+                "candidates": [
+                    {"persona": c["persona"], "content": c["content"]}
+                    for c in candidates
+                ],
+                "world_view": self.world_view,
+                "chapter_outline": self._chapter_outline_for(chapter_index),
+                "chapter_index": chapter_index,
+                "target_length": self._chapter_length,
+            })
+
+        best_index = verdict.get("best_index", 0)
+        if not isinstance(best_index, int) or not 0 <= best_index < len(candidates):
+            best_index = 0
+        winner = candidates[best_index]
+
+        chapter = dict(winner["result"])
+        chapter["persona"] = winner["persona"]
+        chapter["candidates_count"] = len(candidates)
+        chapter["judge_verdict"] = {
+            "winner": winner["persona"],
+            "reason": verdict.get("reason", ""),
+            "scores": verdict.get("scores", []),
+        }
+        self.signals.log_signal.emit(
+            "Pipeline",
+            f"🏆 第{chapter_index}章竞稿完成：中选「{winner['persona']}」"
+            f"（{len(candidates)} 稿参评）— {str(verdict.get('reason', ''))[:60]}")
+        return chapter
+
     def _gen_chapter_worker(self, position: int, input_data: dict):
         """单个章节生成 worker（子线程运行）。"""
         chapter_index = input_data.get("chapter_index", position + 1)
         try:
             with self._semaphore:
-                agent = ChapterGeneratorAgent(self.llm, agent_id=position)
-                agent.log_signal.connect(
-                    lambda name, msg: self.signals.log_signal.emit(name, msg))
-                result = agent.run(input_data)
+                personas = self._active_personas()
+                if len(personas) >= 2:
+                    result = self._generate_chapter_with_contest(
+                        position, input_data, personas)
+                else:
+                    agent = ChapterGeneratorAgent(self.llm, agent_id=position)
+                    agent.log_signal.connect(
+                        lambda name, msg: self.signals.log_signal.emit(name, msg))
+                    result = agent.run(input_data)
                 self._on_chapter_complete(position, result)
         except Exception as e:
             self.signals.log_signal.emit(
@@ -521,19 +723,9 @@ class NovelPipeline(QObject):
         self.signals.stage_started.emit("质量评估")
         self.signals.log_signal.emit("Pipeline", "🔍 [3/5] 质量评估Agent 启动...")
 
-        agent = QualityEvaluatorAgent(self.llm)
-        agent.log_signal.connect(lambda name, msg: self.signals.log_signal.emit(name, msg))
-
-        threshold = self.config.get("quality_threshold", 7.0)
+        # 评估 Agent 在各自的 worker 内创建（并发安全），这里不再共享单例
         needs_revision = []
         passed = []
-
-        outline_detail_map = {}
-        if hasattr(self, "_outline_for_chapters") and self._outline_for_chapters:
-            for ch in self._outline_for_chapters.get("chapters", []):
-                idx = ch.get("chapter_index")
-                if idx is not None:
-                    outline_detail_map[idx] = ch
 
         if new_only and hasattr(self, "_continuation_new_indices") and self._continuation_new_indices:
             chapters_to_eval = [c for c in self.chapters
@@ -542,69 +734,101 @@ class NovelPipeline(QObject):
             chapters_to_eval = self.chapters
 
         total_to_eval = len(chapters_to_eval)
+        concurrency = max(1, int(self.config.get("concurrency", 3)))
         self.signals.log_signal.emit(
-            "Pipeline", f"评估范围: {total_to_eval} 章" + ("（仅新章节）" if new_only else ""))
+            "Pipeline",
+            f"评估范围: {total_to_eval} 章（并发 {concurrency} 路）"
+            + ("｜仅新章节" if new_only else ""))
 
-        for i, chapter in enumerate(chapters_to_eval):
-            if self._finalize_pause_if_requested():
-                return
-            chapter_index = chapter.get("chapter_index", i + 1)
-            if chapter_index in outline_detail_map:
-                chapter_outline = outline_detail_map[chapter_index]
-            else:
-                outline = self.world_view.get("chapter_outline", [])
-                coarse_idx = chapter_index - 1
-                chapter_outline = outline[coarse_idx] if coarse_idx < len(outline) else {}
+        # 评估是纯 LLM I/O 等待，逐章串行会把总时长拉成 N 倍，因此并发执行。
+        # 分类在 worker 内完成以便实时推进度；汇总时按章节顺序遍历，保证
+        # needs_revision 的顺序稳定可复现（不受线程完成先后影响）。
+        semaphore = threading.Semaphore(concurrency)
+        results: dict = {}          # position -> (outcome, chapter_index, evaluation)
+        state_lock = threading.Lock()
+        done = {"n": 0}
 
+        def _eval_worker(position: int, chapter: dict):
+            chapter_index = chapter.get("chapter_index", position + 1)
             self.signals.log_signal.emit("Pipeline", f"评估中: 第{chapter_index}章...")
 
+            evaluation = None
             try:
-                evaluation = agent.run({
-                    "content": chapter.get("content", ""),
-                    "title": chapter.get("title", ""),
-                    "chapter_index": chapter_index,
-                    "world_view": self.world_view,
-                    "chapter_outline": chapter_outline,
-                    "summary": chapter.get("summary", ""),
-                    "target_length": self._chapter_length,
-                    "consistency_rules": self._get_consistency_rules(),
-                })
+                with semaphore:
+                    worker_agent = QualityEvaluatorAgent(self.llm)
+                    worker_agent.log_signal.connect(
+                        lambda name, msg: self.signals.log_signal.emit(name, msg))
+                    evaluation = worker_agent.run({
+                        "content": chapter.get("content", ""),
+                        "title": chapter.get("title", ""),
+                        "chapter_index": chapter_index,
+                        "world_view": self.world_view,
+                        "chapter_outline": self._chapter_outline_for(chapter_index),
+                        "summary": chapter.get("summary", ""),
+                        "target_length": self._chapter_length,
+                        "consistency_rules": self._get_consistency_rules(),
+                    })
+            except Exception as e:
+                self.signals.log_signal.emit(
+                    "Pipeline", f"⚠️ 第{chapter_index}章评估异常: {e}")
 
+            if evaluation is None:
+                outcome = "error"
+            else:
                 self.evaluations[chapter_index] = evaluation
                 self.signals.evaluation_ready.emit(evaluation)
-
                 if evaluation.get("pass", False):
-                    passed.append(chapter_index)
-                    self.signals.chapter_progress.emit(chapter_index, 100, "评估通过")
+                    outcome = "passed"
+                elif NovelPipeline._only_word_count_hard(evaluation):
+                    # 仅字数 hard 硬伤（且 LLM 未挑出非字数问题）：patch 只能局部
+                    # 修改、无法改变篇幅，进修订循环只会空转 → 跳过
+                    self.signals.log_signal.emit(
+                        "Pipeline",
+                        f"第{chapter_index}章仅存在字数偏离问题"
+                        f"（patch 修订无法修复篇幅），保留当前版本，跳过修订循环")
+                    outcome = "word_count_only"
                 else:
-                    # 仅字数 hard 硬伤（且 LLM 未挑出非字数问题）：patch 只能
-                    # 局部修改，无法改变篇幅，进修订循环只会空转 3 轮 → 跳过
-                    only_word_count = NovelPipeline._only_word_count_hard(evaluation)
-                    if only_word_count:
-                        self.signals.log_signal.emit(
-                            "Pipeline",
-                            f"第{chapter_index}章仅存在字数偏离问题"
-                            f"（patch 修订无法修复篇幅），保留当前版本，跳过修订循环")
-                        passed.append(chapter_index)
-                        self.signals.chapter_progress.emit(
-                            chapter_index, 100, "字数偏离，跳过修订")
-                    else:
-                        needs_revision.append({
-                            "chapter_index": chapter_index,
-                            "evaluation": evaluation,
-                            "round": 1
-                        })
-                        self.signals.chapter_progress.emit(chapter_index, 100, "需修订")
+                    outcome = "revision"
 
-            except Exception as e:
-                self.signals.log_signal.emit("Pipeline", f"⚠️ 第{chapter_index}章评估异常: {e}")
+                self.signals.chapter_progress.emit(
+                    chapter_index, 100,
+                    {"passed": "评估通过", "word_count_only": "字数偏离，跳过修订",
+                     "revision": "需修订"}.get(outcome, "评估异常"))
 
-            stage_progress = int(((i + 1) / total_to_eval) * 100) if total_to_eval else 100
-            overall = 60 + int(stage_progress * 0.15)
-            self.signals.overall_progress.emit(overall)
+            with state_lock:
+                results[position] = (outcome, chapter_index, evaluation)
+                done["n"] += 1
+                finished = done["n"]
+
+            stage_progress = int((finished / total_to_eval) * 100) if total_to_eval else 100
+            self.signals.overall_progress.emit(60 + int(stage_progress * 0.15))
+
+        threads = [
+            threading.Thread(target=_eval_worker, args=(i, ch), daemon=True)
+            for i, ch in enumerate(chapters_to_eval)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         if self._finalize_pause_if_requested():
             return
+
+        # 顺序汇总（并发完成顺序不等于章节顺序）
+        for position in range(total_to_eval):
+            chapter = chapters_to_eval[position]
+            fallback_index = chapter.get("chapter_index", position + 1)
+            outcome, chapter_index, evaluation = results.get(
+                position, ("error", fallback_index, None))
+            if outcome in ("passed", "word_count_only"):
+                passed.append(chapter_index)
+            elif outcome == "revision":
+                needs_revision.append({
+                    "chapter_index": chapter_index,
+                    "evaluation": evaluation,
+                    "round": 1,
+                })
 
         self.signals.stage_completed.emit("质量评估")
         self.signals.log_signal.emit(
@@ -691,6 +915,19 @@ class NovelPipeline(QObject):
         return False
 
     @staticmethod
+    def _rule_hard_count(evaluation: dict) -> int:
+        """硬校验 hard 问题数。优先用评估阶段记录的计数，旧数据则现算。
+
+        这是修订循环里唯一的**确定性**信号：LLM 打分有 ±0.5 以上的噪声，
+        而硬校验的增减是可复现的，因此收敛判断优先看它。
+        """
+        count = evaluation.get("rule_hard_count")
+        if isinstance(count, int):
+            return count
+        return sum(1 for i in evaluation.get("rule_issues", [])
+                   if i.get("severity") == "hard")
+
+    @staticmethod
     def _only_word_count_hard(evaluation: dict) -> bool:
         """是否仅存在字数 hard 硬伤、无其他需修订的问题（应直接跳过修订循环）。
 
@@ -713,7 +950,9 @@ class NovelPipeline(QObject):
         return not llm_issues
 
     def _apply_revision_result(self, content: str, result: dict,
-                               chapter_index: int, round_num: int) -> tuple:
+                               chapter_index: int, round_num: int,
+                               issues: list | None = None,
+                               highlights: list | None = None) -> tuple:
         """根据 RevisionAgent 输出决定如何更新内容。"""
         if result.get("_fallback_full_rewrite"):
             fallback = result.get("_fallback_content", "")
@@ -753,22 +992,59 @@ class NovelPipeline(QObject):
                 f"⚠️ 第{chapter_index}章第{round_num}轮 patch 命中率过低"
                 f"（{success_rate:.0%}），回退到全文重写")
             fallback_content = self._fallback_full_rewrite(
-                content, result, chapter_index, round_num)
+                content, issues or [], highlights or [],
+                chapter_index, round_num)
             return fallback_content, [], [], []
 
         return new_content, applied, failed, log_entries
 
-    def _fallback_full_rewrite(self, content: str, result: dict,
-                                chapter_index: int, round_num: int) -> str:
-        """全文重写回退：保留清理后的原文。"""
-        import re
-        cleaned = re.sub(r"<!--REVISION:[^>]*?-->", "", content)
-        cleaned = re.sub(r"<!--NO_CHANGE-->", "", cleaned).strip()
+    def _fallback_full_rewrite(self, content: str, issues: list,
+                               highlights: list, chapter_index: int,
+                               round_num: int) -> str:
+        """patch 命中率过低时的兜底：让模型整章重写。
+
+        局部锚点几乎全部落空，说明问题不是"某几句要改"，而是需要整体重写
+        （节奏、结构类问题尤其如此）——继续发 patch 只会继续落空。
+        重写稿仍要过重评，分数退步会被回滚，因此这里可以放心交给模型；
+        异常或疑似截断时保守地保留原文。
+        """
+        if not self.config.get("enable_full_rewrite_fallback", True):
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"第{chapter_index}章第{round_num}轮：patch 命中率过低，"
+                f"全文重写已禁用，保留原文")
+            return content
+
+        try:
+            agent = RevisionAgent(self.llm)
+            agent.log_signal.connect(
+                lambda name, msg: self.signals.log_signal.emit(name, msg))
+            rewritten = agent.run_rewrite({
+                "content": content,
+                "issues": issues,
+                "highlights": highlights,
+                "world_view": self.world_view,
+                "chapter_index": chapter_index,
+                "current_round": round_num,
+            })
+        except Exception as e:
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"⚠️ 第{chapter_index}章第{round_num}轮全文重写失败: {e}，保留原文")
+            return content
+
+        # 重写稿明显短于原文 → 很可能是被截断，保留原文更安全
+        if not rewritten or len(rewritten) < max(200, len(content) * 0.5):
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"第{chapter_index}章第{round_num}轮：全文重写返回过短，保留原文")
+            return content
+
         self.signals.log_signal.emit(
             "Pipeline",
-            f"第{chapter_index}章第{round_num}轮：全文重写回退，保留清理后的原文"
-            "（建议手动修改后重跑评估）")
-        return cleaned
+            f"第{chapter_index}章第{round_num}轮：已整章重写"
+            f"（{len(content)} → {len(rewritten)} 字）")
+        return rewritten
 
     def _run_revisions(self):
         """Step 4: 修订循环（并行：不同章节同时修订，受 concurrency 限制）"""
@@ -814,7 +1090,12 @@ class NovelPipeline(QObject):
         semaphore = threading.Semaphore(self.config.get("concurrency", 2))
 
         def _revise_worker(item: dict, chapter: dict):
-            """单个章节的一轮修订（修订 + 按需重评），在子线程运行。"""
+            """单个章节的一轮修订（修订 + 按需重评），在子线程运行。
+
+            采纳策略遵循"保留最优"：修订稿只有不劣于原稿才留下，分数明显退步
+            时回滚到本轮之前的版本——否则修订循环可能越改越差，而且用户看到的
+            会是最后一轮（可能最差）的稿子。
+            """
             chapter_index = item["chapter_index"]
             evaluation = item["evaluation"]
             round_num = item["round"]
@@ -823,7 +1104,43 @@ class NovelPipeline(QObject):
                     self.signals.log_signal.emit(
                         "Pipeline", f"修订第{chapter_index}章（第{round_num}轮）...")
 
-                    issues = evaluation.get("issues", [])
+                    # 回滚快照：本轮修订若导致退步，用它还原
+                    prev_content = chapter.get("content", "")
+                    prev_revision_log = list(chapter.get("revision_log", []))
+
+                    # 版本校验：评估结论必须对应眼前的这版正文。正文若在评估之后
+                    # 被改动过（手动编辑、外部改写、异常回滚），旧结论已失效，
+                    # 拿它去修订会"对着旧版本改"——锚点必然大面积落空。
+                    eval_digest = evaluation.get("content_digest")
+                    if eval_digest and \
+                            eval_digest != QualityEvaluatorAgent.content_digest(prev_content):
+                        self.signals.log_signal.emit(
+                            "Pipeline",
+                            f"⚠️ 第{chapter_index}章评估结论与当前正文版本不符"
+                            f"（正文已被改动），跳过本轮修订，请重跑评估")
+                        self.signals.chapter_progress.emit(
+                            chapter_index, 100, "评估已过期")
+                        return
+
+                    raw_issues = evaluation.get("issues", [])
+                    # 字数类问题不参与 patch：局部替换改不了整章篇幅，留在
+                    # issues 里只会让模型产出注定落空的锚点，白白消耗 token。
+                    issues = [i for i in raw_issues
+                              if i.get("type") != "word_count"]
+                    dropped = len(raw_issues) - len(issues)
+                    if dropped:
+                        self.signals.log_signal.emit(
+                            "Pipeline",
+                            f"第{chapter_index}章：{dropped} 项字数偏离问题不参与"
+                            f" patch 修订（需调整目标字数或手动增删篇幅）")
+                    if not issues:
+                        self.signals.log_signal.emit(
+                            "Pipeline",
+                            f"第{chapter_index}章：无非字数问题可修订，跳过本轮")
+                        self.signals.chapter_progress.emit(
+                            chapter_index, 100, "无需修订")
+                        return
+
                     highlights = evaluation.get("highlights", [])
                     previous_patches = chapter.get("revision_log", [])
 
@@ -832,7 +1149,7 @@ class NovelPipeline(QObject):
                         lambda name, msg: self.signals.log_signal.emit(name, msg))
 
                     result = agent.run({
-                        "content": chapter.get("content", ""),
+                        "content": prev_content,
                         "issues": issues,
                         "highlights": highlights,
                         "world_view": self.world_view,
@@ -843,8 +1160,9 @@ class NovelPipeline(QObject):
                     })
 
                     revised_content, applied, failed, log_entries = \
-                        self._apply_revision_result(chapter.get("content", ""),
-                                                    result, chapter_index, round_num)
+                        self._apply_revision_result(prev_content, result,
+                                                    chapter_index, round_num,
+                                                    issues, highlights)
 
                     chapter["content"] = revised_content
                     chapter["word_count"] = len(revised_content)
@@ -863,48 +1181,75 @@ class NovelPipeline(QObject):
 
                     if round_num < max_rounds and result.get("revised", False):
                         eval_agent = QualityEvaluatorAgent(self.llm)
-                        outline = self.world_view.get("chapter_outline", [])
-                        ch_idx = chapter_index - 1
-                        chapter_outline = outline[ch_idx] if ch_idx < len(outline) else {}
-
                         new_eval = eval_agent.run({
-                            "content": chapter["content"],
+                            "content": revised_content,
                             "title": chapter.get("title", ""),
                             "chapter_index": chapter_index,
                             "world_view": self.world_view,
-                            "chapter_outline": chapter_outline,
+                            # 与初评走同一入口，保证两次打分依据一致
+                            "chapter_outline": self._chapter_outline_for(chapter_index),
                             "summary": chapter.get("summary", ""),
                             "target_length": self._chapter_length,
                             "consistency_rules": self._get_consistency_rules(),
                         })
 
                         prev_score = evaluation.get("overall_score", 0)
+                        prev_hard = NovelPipeline._rule_hard_count(evaluation)
                         new_score = new_eval.get("overall_score", 0)
+                        new_hard = NovelPipeline._rule_hard_count(new_eval)
+
+                        # 重评结果回写，否则最终汇总 / 前端看到的还是修订前的旧分数
+                        # （evaluation_ready 只在正式评估阶段发，避免误改 Agent 状态）
+                        self.evaluations[chapter_index] = new_eval
+
                         if new_eval.get("pass", False):
                             self.signals.log_signal.emit(
                                 "Pipeline",
                                 f"第{chapter_index}章修订后通过！")
+                        elif new_score < prev_score - 0.5:
+                            # 退步：回滚到修订前版本，保留较优稿
+                            chapter["content"] = prev_content
+                            chapter["word_count"] = len(prev_content)
+                            chapter["revision_log"] = prev_revision_log
+                            chapter["revised"] = bool(prev_revision_log)
+                            self.evaluations[chapter_index] = evaluation
+                            if self.project_dir:
+                                save_chapter(self.project_dir, chapter_index, chapter)
+                            self.signals.log_signal.emit(
+                                "Pipeline",
+                                f"⚠️ 第{chapter_index}章修订后分数下降"
+                                f"（{prev_score}→{new_score}），已回滚到修订前版本")
                         elif NovelPipeline._has_word_count_hard(new_eval):
                             # 字数硬伤 patch 修不了篇幅，继续只会空转轮次 → 停止
                             self.signals.log_signal.emit(
                                 "Pipeline",
                                 f"第{chapter_index}章修订后仍存在字数硬伤"
                                 f"（patch 无法修复篇幅），停止修订")
-                        elif (result.get("applied_count", 0) == 0
-                              or new_score <= prev_score + 0.5):
-                            # 收敛判断：本轮 patch 一个都没命中（改了等于没改），
-                            # 或修订后分数无实质提升 → 修订已停滞，提前停止
+                        elif result.get("applied_count", 0) == 0:
+                            # 本轮 patch 一个都没命中（改了等于没改）→ 收敛
                             self.signals.log_signal.emit(
                                 "Pipeline",
-                                f"第{chapter_index}章修订后分数无提升"
-                                f"（{prev_score}→{new_score}），判定收敛，停止修订")
-                        else:
+                                f"第{chapter_index}章本轮 patch 零命中，判定收敛，停止修订")
+                        elif new_hard < prev_hard or new_score > prev_score + 0.5:
+                            # 确定性硬伤减少、或分数有实质提升 → 值得再来一轮。
+                            # 优先信硬校验：它是确定性的，不像 LLM 打分有噪声。
+                            self.signals.log_signal.emit(
+                                "Pipeline",
+                                f"第{chapter_index}章仍有改进空间"
+                                f"（硬伤 {prev_hard}→{new_hard}，分数 {prev_score}→{new_score}），"
+                                f"进入下一轮")
                             with queue_lock:
                                 next_round_queue.append({
                                     "chapter_index": chapter_index,
                                     "evaluation": new_eval,
                                     "round": round_num + 1
                                 })
+                        else:
+                            self.signals.log_signal.emit(
+                                "Pipeline",
+                                f"第{chapter_index}章修订后无实质提升"
+                                f"（硬伤 {prev_hard}→{new_hard}，分数 {prev_score}→{new_score}），"
+                                f"判定收敛，停止修订")
                     elif round_num >= max_rounds:
                         self.signals.log_signal.emit(
                             "Pipeline",
@@ -1029,6 +1374,7 @@ class NovelPipeline(QObject):
             "project_dir": str(self.project_dir) if self.project_dir else "",
             "status": status,
             "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            **self._cost_summary(),
         }
 
         if self.project_dir:
@@ -1092,10 +1438,61 @@ class NovelPipeline(QObject):
             summary["chapters_count"] = len(saved_chapters)
             summary["total_words"] = sum(
                 chapter.get("word_count", 0) for chapter in saved_chapters)
+        summary.update(self._cost_summary())
         save_project_summary(self.project_dir, summary)
+
+    def _enforce_budget_gate(self) -> None:
+        """成本门禁：达 80% 告警，达上限请求暂停（进度无损，调高上限可续写）。
+
+        挂在 `_finalize_pause_if_requested` 上，于是所有已有的安全边界都自动
+        生效，不必在每个循环里重复插入检查。真正的停止仍由后者按安全边界
+        （如章节 worker 未结束、正在审阅）决定时机。
+        """
+        if self._pause_requested or not getattr(self, "llm", None):
+            return
+        try:
+            status = self.llm.budget_status()
+        except Exception:
+            return
+
+        limit = status.get("limit_usd") or 0
+        if limit <= 0:
+            return
+
+        ratio = status.get("ratio", 0.0)
+        if ratio >= 0.8 and not self._budget_warned:
+            self._budget_warned = True
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"💰 成本已用 ${status['spent_usd']:.2f} / ${limit:.2f}"
+                f"（{ratio:.0%}），接近预算上限")
+
+        if status.get("exceeded"):
+            self._pause_requested = True
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"🛑 成本已达预算上限（${status['spent_usd']:.2f} / ${limit:.2f}），"
+                f"自动暂停并保存。在设置中调高上限后可从项目库继续生成")
+
+    def _cost_summary(self) -> dict:
+        """当前成本快照，用于回传前端与写入项目摘要。"""
+        if not getattr(self, "llm", None):
+            return {}
+        try:
+            status = self.llm.budget_status()
+        except Exception:
+            return {}
+        return {
+            "cost_usd": status.get("spent_usd", 0.0),
+            "cost_limit_usd": status.get("limit_usd", 0.0),
+            "llm_calls": status.get("calls", 0),
+            "input_tokens": status.get("input_tokens", 0),
+            "output_tokens": status.get("output_tokens", 0),
+        }
 
     def _finalize_pause_if_requested(self) -> bool:
         """在安全边界结束暂停；返回是否已经停止当前流水线。"""
+        self._enforce_budget_gate()
         if not self._pause_requested:
             return False
         if getattr(self, "_world_view_reviewing", False):
@@ -1120,6 +1517,7 @@ class NovelPipeline(QObject):
             "total_words": sum(
                 chapter.get("word_count", 0) for chapter in saved_chapters),
             "stage": paused_stage,
+            **self._cost_summary(),
         })
         return True
 
@@ -1550,6 +1948,10 @@ class NovelPipeline(QObject):
             return
 
         self.outline = reviewed_outline
+        # 评估与修订读的是 _outline_for_chapters（优先于 self.outline）。主流程
+        # 若不设置，评估会退回世界观阶段的粗大纲——那份只有 title/summary，
+        # 会让 rule_checker 的关键事件/出场人物两项检查形同虚设。
+        self._outline_for_chapters = reviewed_outline
         self._pending_outline = None
         self._outline_reviewing = False
 

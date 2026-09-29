@@ -79,6 +79,23 @@ SYSTEM_PROMPT = """你是一位专业的小说内容优化专家，擅长审稿�
 - ❌ 输出全文而不是 patch → pipeline 无法消费"""
 
 
+REWRITE_SYSTEM_PROMPT = """你是一位专业的小说内容优化专家。本轮采用**整章重写**模式。
+
+上一轮尝试用局部替换（patch）修订，但锚点几乎全部落空，说明问题不在个别句子，
+而在整体（结构、节奏、视角、逻辑链）。因此你需要输出**完整修订后的正文**。
+
+## 要求
+
+1. 完整保留评估指出的**亮点**，一个字都不要改
+2. 针对每个问题逐条修复，不要遗漏
+3. 严格遵守世界观设定与人物设定
+4. 保持原文的叙事风格与语言质感，不要让读者感到"这一段被 AI 重写了"
+5. 篇幅与原文相当（允许 ±15%），不要大段扩写或压缩
+6. **只输出正文**：不要章节标题、不要解释、不要 Markdown 代码块、不要 JSON
+
+直接输出修订后的章节正文。"""
+
+
 class RevisionAgent(BaseAgent):
     """回流修订 Agent —— patch 协议版"""
 
@@ -212,6 +229,73 @@ class RevisionAgent(BaseAgent):
             }
             self.finished_signal.emit(self.name, result)
             return result
+
+    def run_rewrite(self, input_data: dict) -> str:
+        """整章重写（patch 命中率过低时的兜底）。
+
+        与 ``run()`` 的 patch 协议不同，这里要求模型直接输出完整正文——当局部
+        锚点几乎全部落空时，继续发 patch 只会继续落空，必须换一种修订形态。
+
+        输入: {
+            "content": str,          # 原始章节正文
+            "issues": list,          # 需要修复的问题（不含字数类）
+            "highlights": list,      # 必须保留的亮点
+            "world_view": dict,
+            "chapter_index": int,
+            "current_round": int,
+        }
+        输出: 纯文本正文；失败时返回空串，由 pipeline 决定是否保留原文。
+        """
+        content = input_data.get("content", "")
+        issues = input_data.get("issues", [])
+        highlights = input_data.get("highlights", [])
+        world_view = input_data.get("world_view", {})
+        chapter_index = input_data.get("chapter_index", 1)
+        current_round = input_data.get("current_round", 1)
+
+        self.set_status("running")
+        self.log(
+            f"第{chapter_index}章第{current_round}轮：patch 命中率过低，改为整章重写...")
+        self.set_progress(10)
+
+        user_prompt = f"""【需要重写的章节正文】
+{content}
+
+【世界观规则（重写时必须严格遵守）】
+{world_view.get('world_view', {}).get('rules', '无特殊规则')}
+
+【评估出的问题（必须全部处理）】
+{self._format_issues(issues)}
+
+【评估里指出的亮点（必须完整保留，一个字都不要改）】
+{self._format_highlights(highlights)}
+
+【重写要求】
+1. 输出完整正文，不要只输出修改片段
+2. 篇幅与原文相当（原文约 {len(content)} 字）
+3. 亮点原样保留，严格遵守世界观设定
+4. 只输出正文本身，不要任何解释、标题或标记"""
+
+        self.set_progress(40)
+
+        try:
+            raw = self.call_llm(
+                system_prompt=REWRITE_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                temperature=0.6,
+                max_tokens=max(6000, len(content) * 2),
+            )
+            self.set_progress(90)
+            cleaned = self._strip_code_fence(
+                self._strip_html_comments(raw or ""))
+            self.set_progress(100)
+            self.set_status("success")
+            self.log(f"第{chapter_index}章整章重写完成：{len(cleaned)} 字")
+            return cleaned
+        except Exception as e:
+            self.set_status("error")
+            self.log(f"❌ 整章重写失败: {e}")
+            return ""
 
     # ------------------------------------------------------------------
     #  响应解析
@@ -349,3 +433,14 @@ class RevisionAgent(BaseAgent):
         text = re.sub(r"<!--REVISION:[^>]*?-->", "", text)
         text = re.sub(r"<!--NO_CHANGE-->", "", text)
         return text.strip()
+
+    @staticmethod
+    def _strip_code_fence(text: str) -> str:
+        """剥掉模型可能加的 ``` 围栏（整章重写时偶发）。"""
+        import re
+        stripped = (text or "").strip()
+        if not stripped.startswith("```"):
+            return stripped
+        stripped = re.sub(r"^```[a-zA-Z]*\s*\n?", "", stripped)
+        stripped = re.sub(r"\n?```\s*$", "", stripped)
+        return stripped.strip()

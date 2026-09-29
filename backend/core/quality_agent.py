@@ -68,6 +68,18 @@ class QualityEvaluatorAgent(BaseAgent):
     def __init__(self, llm_client):
         super().__init__("质量评估", llm_client)
 
+    @staticmethod
+    def content_digest(content: str) -> str:
+        """正文内容指纹。
+
+        评估结论必须与它所评的那一版正文绑定：正文一旦被改动（修订、重写、
+        回滚、手动编辑），旧评估就不再可信。pipeline 在消费评估结果前会比对
+        这个指纹，避免"对着旧版本做修订决策"（参考 novel-studio 的
+        digest/SHA-256 绑定做法）。
+        """
+        import hashlib
+        return hashlib.sha256((content or "").strip().encode("utf-8")).hexdigest()[:16]
+
     def run(self, input_data: dict) -> dict:
         """
         输入: {
@@ -136,6 +148,8 @@ class QualityEvaluatorAgent(BaseAgent):
             # 添加章节索引信息
             evaluation["chapter_index"] = chapter_index
             evaluation["chapter_title"] = title
+            # 绑定被评估正文的版本指纹
+            evaluation["content_digest"] = self.content_digest(content)
 
             # ── 合并两层 issues ──────────────────────────────
             llm_issues = evaluation.get("issues", [])
@@ -186,6 +200,7 @@ class QualityEvaluatorAgent(BaseAgent):
             self.log(f"❌ 评估失败: {e}")
             error_result = {
                 "chapter_index": chapter_index,
+                "content_digest": self.content_digest(content),
                 "overall_score": 0,
                 "pass": False,
                 "needs_revision": True,

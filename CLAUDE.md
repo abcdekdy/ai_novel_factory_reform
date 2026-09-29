@@ -85,7 +85,7 @@ backend/         — FastAPI + Python 核心
 灵感 → 世界观构建(world_view.json, 0-15%) → ⏸世界观审阅(confirm_world_view)
      → 大纲生成(outline.json, 10-25%) → ⏸大纲审阅(confirm_outline)
      → 并行章节生成(25-60%, Semaphore并发)
-     → 质量评估(60-75%, LLM打分 + rule_checker硬校验)
+     → 质量评估(60-75%, 并发LLM打分 + rule_checker硬校验)
      → 修订循环(75-90%, patch协议, 命中率<50%回退全文重写)
      → 多平台适配(90-100%) → 完成
 ```
@@ -104,11 +104,30 @@ backend/         — FastAPI + Python 核心
 
 ### 修订机制
 - **patch 协议**：RevisionAgent 输出 `[{anchor, replacement, reason}]`，精确匹配 + fuzzy 匹配（忽略空白/全半角标点）
-- **命中率阈值**：patch 命中 <50% 时回退到全文重写模式
+- **命中率阈值**：patch 命中 <50% 时回退到**整章重写**（`RevisionAgent.run_rewrite()` 输出完整正文，非仅清理原文）；可用 `enable_full_rewrite_fallback` 关闭
 - **最大轮数**：`max_revision_rounds`（默认 3），每轮修订后重跑评估
-- **字数硬伤跳过**：仅字数 hard 硬伤（无其他问题）的章节直接跳过修订循环（patch 修不了篇幅）；修订轮内重评后仍存在字数硬伤 → 立即停止，不再空转轮次
-- **收敛判断**：修订后分数提升 <0.5，或本轮 patch 零命中 → 判定收敛停止
+- **字数类问题过滤**：`word_count` 类型的 issue 不进入 patch 修订（局部替换改不了篇幅，只会产出注定落空的锚点）；若过滤后已无问题可修订，直接跳过本轮，零 token 开销
+- **仅字数硬伤跳过**：仅字数 hard 硬伤（无其他问题）的章节在初评即跳过修订循环；修订轮内重评后仍存在字数硬伤 → 立即停止
+- **保留最优（回滚）**：修订稿分数明显退步（< 上轮 −0.5）时回滚到本轮之前的正文与评估，避免越改越差、最后留下最差版本
+- **收敛判断**：优先信**确定性信号**——硬校验 hard 问题数减少即可继续下一轮；否则要求分数提升 >0.5；patch 零命中视为收敛停止
+- **评估依据统一**：初评与重评都经 `_chapter_outline_for()` 取"粗大纲 + 细大纲"合并结果，保证两次打分可比
+- **版本绑定**：每条评估带正文指纹 `content_digest`（SHA-256 前 16 位）；修订前校验，正文若在评估后被改动则拒绝修订（防"对着旧版本改"）
 - **手动编辑保护**：章节标记 `manually_edited` 后修订循环跳过该章节
+
+### 成本门禁
+- `LLMClient` 从每次响应的 `usage` 字段累计 token（流式取 `get_final_message()`，网关不支持则静默跳过），按配置单价估算花费
+- 达 **80%** 告警一次；达 **上限** 自动请求暂停（进度无损，调高上限后可从项目库续写）
+- 检查挂在 `_enforce_budget_gate()`，由 `_finalize_pause_if_requested()` 调用——于是**所有已有的安全边界自动生效**，无需在每个循环里重复插桩
+- `budget_max_cost_usd` 为 0 表示不限制；成本快照写入项目摘要并随 `pipeline_finished` 回传（`cost_usd` / `llm_calls` / tokens）
+- 单价需用户按所用服务填写（美元/百万 token），代码无法推断
+
+### 多人格竞稿
+- 配置 `chapter_personas`（每行「名称|风格描述」，`#` 开头为注释），≥2 个人格时启用
+- 每章为每个人格并行生成候选稿 → `JudgeAgent` 逐稿打分（要求**逐字引用原文举证**）→ 中选稿成为正稿
+- 同一章只占**一个**并发位（章节级信号量），避免"N 人格 × 并发章数"打满服务端
+- 失败容忍：某人格**连续失败 3 次自动弃权**；只剩 1 稿时不调用 Judge；全员失败降级单 Writer
+- 成本：调用次数 ≈ 人格数 + 1（Judge），建议配合成本门禁
+- 留空或仅 1 个人格 → 完全走原有单 Writer 路径，零额外开销
 
 ### 续写/恢复模式
 - **续写**：`continue_from_project()` → 加载遗产包 → 后台线程跑 ContinuationOutlineAgent 生成批次大纲 → 审阅 → 仅评估新章节 → 状态保持 `generating`（连载未完）
@@ -143,6 +162,7 @@ backend/         — FastAPI + Python 核心
 | `max_tokens` | 4096 | 单次最大 token |
 | `concurrency` | 3 | 章节并行数 |
 | `max_revision_rounds` | 3 | 最大修订轮数 |
+| `enable_full_rewrite_fallback` | true | patch 命中率过低时是否整章重写兜底 |
 | `quality_threshold` | 7.0 | 质量通过线（满分10） |
 | `default_chapter_count` | 5 | 默认章节数 |
 | `default_chapter_length` | 3000 | 默认每章字数 |
@@ -150,6 +170,10 @@ backend/         — FastAPI + Python 核心
 | `enable_outline_agent` | true | 大纲 Agent 开关 |
 | `outline_max_tokens` | 8192 | 大纲最大 token |
 | `outline_temperature` | 0.7 | 大纲温度 |
+| `budget_max_cost_usd` | 0.0 | 成本上限（美元），0 = 不限制 |
+| `budget_price_input_per_mtok` | 3.0 | 输入单价（美元/百万 token） |
+| `budget_price_output_per_mtok` | 15.0 | 输出单价（美元/百万 token） |
+| `chapter_personas` | （空） | 竞稿人格，每行「名称\|风格描述」 |
 
 前端设置页通过 `GET /api/config` 获取配置（API Key 脱敏返回 `api_key_masked`），`PUT /api/config` 更新配置（白名单过滤字段，api_key 非空才写入）。
 
@@ -255,7 +279,85 @@ backend/         — FastAPI + Python 核心
     - 修复：① 章节生成 prompt 强化目标字数硬约束（±10% + 写完自检）；② `max_tokens` 从固定 6000 改为 `max(6000, target_length*2)` 动态扩展；③ 评估 8192→6144、修订 16384→8192（字数偏差按正常现象接受，未做压缩校准）
     - 文件：`backend/core/chapter_agent.py`、`backend/core/quality_agent.py`、`backend/core/revision_agent.py`
 
+### 2026-09-29 修复（回流修订专项，借鉴开源同类项目）
+
+17. **规则校验器一半是死代码（关键）**
+    - 问题：`key_events` / `characters_present` / `cliffhanger` 由 `OutlineBuilderAgent`（细大纲）产出，而 `WorldBuilderAgent` 的 `chapter_outline` 只有 `{chapter, title, summary}`。`confirm_outline()` 从未设置 `_outline_for_chapters`，导致主流程评估退回粗大纲 → `rule_checker` 的**关键事件覆盖**与**出场人物**两项永远 `total=0`、无条件通过。生成器拿到的是细大纲，评估器拿到的是粗大纲——"按 A 写，按 B 评"
+    - 修复：新增 `_chapter_outline_for(chapter_index)` 作为唯一入口，返回「粗大纲兜底基础字段 + 细大纲覆盖可校验字段」的合并结果；`confirm_outline()` / `_generate_outline()` 显式设置 `_outline_for_chapters`
+    - 文件：`backend/core/pipeline.py`
+
+18. **初评与重评依据不一致，收敛判断失真（关键）**
+    - 问题：初评用 `_outline_for_chapters`（续写批次大纲），重评却用 `world_view["chapter_outline"]` 且按 `chapter_index-1` 取——续写第 11 章会去读原始粗大纲第 11 项（越界得 `{}`）。两次打分依据不同、分数不可比，"提升 >0.5 才继续"的判断失去意义
+    - 修复：重评改走 `_chapter_outline_for()`；位置回退增加"仅当大纲确为 1 基编号"的守卫，杜绝续写批次大纲按位置错配
+    - 文件：`backend/core/pipeline.py`（该错配由单元验证脚本捕获）
+
+19. **修订稿无条件采纳，越改越差也不回滚**
+    - 问题：`chapter["content"] = revised_content` 在重评之前就写入，之后发现分数下降也只是"停止"，从不回滚 → 用户最终拿到的是最后一轮（可能最差）的稿子
+    - 修复：引入"保留最优"——修订稿分数下降超 0.5 时回滚正文、`revision_log`、字数与评估结论，并落盘。对应 PaperOrchestra `REVERT_OVERALL_DECREASED` / LoopGain `argmin(error)` 的 best-so-far 语义
+    - 文件：`backend/core/pipeline.py`
+
+20. **收敛判断只信噪声分数，不用确定性信号**
+    - 问题：唯一判据是两次独立 LLM 打分（temperature 0.3，噪声 ±0.5 以上），而硬校验的确定性增减完全没被利用
+    - 修复：新增 `_rule_hard_count()`；硬伤数减少即可继续下一轮，否则才看分数提升 >0.5。确定性信号优先
+    - 文件：`backend/core/pipeline.py`
+
+21. **"全文重写回退"名不副实**
+    - 问题：`_fallback_full_rewrite()` 声称"回退到全文重写"（CLAUDE.md 亦如此记载），实际只做 `re.sub` 清理 HTML 注释后**返回原文**，等于 patch 命中率低时静默放弃
+    - 修复：实现真正的 `RevisionAgent.run_rewrite()`（整章重写，独立 system prompt，只输出正文，剥代码围栏），并由 `enable_full_rewrite_fallback` 控制；异常或返回过短（疑似截断）时保守保留原文。回滚机制使其风险可控
+    - 文件：`backend/core/revision_agent.py`、`backend/core/pipeline.py`、`backend/core/config.py`
+
+22. **字数类问题仍在喂给 patch 修订**
+    - 问题：只要 LLM 同时报了一个 style 问题，字数 hard 就会留在 `issues` 里发给 RevisionAgent → 模型试图用局部替换改篇幅，必然产出落空的锚点，白烧一次修订（8192）+ 重评（6144）
+    - 修复：`word_count` 类型 issue 一律从修订列表中过滤（并记录条数）；过滤后无问题可修订则直接跳过本轮，零 token 开销
+    - 文件：`backend/core/pipeline.py`
+
+23. **评估结论未绑定正文版本（借鉴 novel-studio 的 digest 机制）**
+    - 问题：评估、修订、回滚之间没有版本校验，正文一旦被改动，旧评估仍会被拿去做修订决策——"对着旧版本改"，锚点大面积落空
+    - 修复：`QualityEvaluatorAgent.content_digest()` 计算正文 SHA-256 前 16 位并写入评估；修订前比对，版本不符即拒绝本轮修订并提示重跑评估
+    - 文件：`backend/core/quality_agent.py`、`backend/core/pipeline.py`
+
+24. **重评结果未回写 `self.evaluations`**
+    - 问题：修订后的新分数只用于本轮判断，最终汇总（均分）与前端展示仍是修订前的旧分数
+    - 修复：重评后回写 `self.evaluations`（回滚时一并还原）；不额外发 `evaluation_ready`，避免误改前端 Agent 状态
+    - 文件：`backend/core/pipeline.py`
+
+**验证**：以假 LLM 端到端驱动修订循环，覆盖 6 个场景（退步回滚 / 有提升续轮 / 字数硬伤停止 / 无提升收敛 / 硬伤减少续轮 / 版本不符拒绝）全部通过；`_chapter_outline_for`、`_rule_hard_count`、`content_digest`、`_apply_patches` 的确定性用例亦全部通过。
+
+**当时列出的三项待办**（并发评估 / 成本门禁 / 多人格竞稿）已在下方迭代中实现。
+
+### 2026-09-29 迭代（承接上条，实现三项增强）
+
+25. **质量评估改为并发**
+    - 问题：`_evaluate_chapters` 逐章串行调用 LLM（纯 I/O 等待），20 章需 10–20 分钟
+    - 修复：受 `concurrency` 限制的并发评估。分类在各 worker 内完成以保证进度实时推进，**汇总时按章节顺序遍历**，因此 `needs_revision` 顺序稳定可复现，不受线程完成先后影响；每章异常仅跳过该章
+    - 实测：6 章（含 1 章 0.4s 慢响应）从串行 ~0.9s 降到 0.40s，并发峰值严格等于上限
+    - 文件：`backend/core/pipeline.py`
+
+26. **成本门禁**（借鉴 ainovel-cli 的 `budget.max_cost_usd`）
+    - 问题：长跑无花费上限，竞稿/多轮修订会成倍放大成本
+    - 修复：`LLMClient` 累计 token 并按单价估算花费；80% 告警一次、达上限自动暂停且进度无损。检查挂在 `_finalize_pause_if_requested` 上，**所有已有安全边界自动生效**
+    - 容错：网关不返回 `usage`、字段异常、`budget_status` 抛错——一律静默降级，绝不因统计问题中断生成
+    - 文件：`backend/core/llm_client.py`、`backend/core/pipeline.py`
+
+27. **多人格竞稿 + Judge 选优**（借鉴 ainovel-cli 的多人格竞稿 / Judge 选优）
+    - 新增 `JudgeAgent`：逐稿独立打分，要求**逐字引用原文举证**；编号越界/解析失败一律保底选第 1 稿，不让评审环节拖垮流水线
+    - `ChapterGeneratorAgent` 支持 `persona`，在通用规范外注入风格要求
+    - 失败容忍：连续失败 3 次自动弃权、单稿不评审、全员失败降级单 Writer
+    - 成本控制：同一章只占一个并发位（章节级信号量），避免人格数 × 并发章数打满服务端
+    - 文件：`backend/core/judge_agent.py`（新增）、`backend/core/chapter_agent.py`、`backend/core/pipeline.py`
+
+28. **清理历史脚本**：删除 `backend/core/fix_pipeline{,2,3}.py`（已确认无任何模块引用）
+
+**验证**：新增 3 组验证脚本（成本门禁 18 项、并发评估 12 项、竞稿与人格解析 15 项）全部通过；前端 `tsc --noEmit` 通过。验证脚本为一次性搭建，已清理，未入库。
+
+**已知遗留（未处理）**：
+- `quality_threshold`（质量阈值）在后端**从未被使用**——通过/需修订完全由 LLM 的 `pass` 字段 + `rule_checker` 硬伤数决定，设置页那个滑杆目前不产生任何效果。修掉它会改变通过判定、进而影响修订轮数与成本，故留给用户决策
+- `theme` 不在后端 `DEFAULT_CONFIG` 中，被 `PUT /api/config` 的白名单过滤掉，服务端不持久化
+- 章节生成阶段未见端到端真实 API 验证（验证均使用假 LLM 驱动循环逻辑）
+
 ## 开发规范
+
+- **QObject 子类属性必须静态初始化**：在 QObject 子类实例上用 `getattr(obj, name, default)` 探测**尚不存在**的属性时，PyQt6 抛的是 `RuntimeError`（"super-class `__init__()` was never called"）而非 `AttributeError`，`getattr` 的默认值兜不住。新增状态字段一律在 `__init__` 中初始化（踩坑记录见 `_persona_semaphore`）
 
 - **中文 UI**：所有界面文字使用中文
 - **无 emoji**：不在 UI 中使用 emoji（日志内容除外）
@@ -299,6 +401,8 @@ backend/         — FastAPI + Python 核心
 | 配置路由 | `backend/api/config.py` |
 | 流水线引擎 | `backend/core/pipeline.py` |
 | Agent 基类 | `backend/core/base_agent.py` |
+| 章节生成 Agent | `backend/core/chapter_agent.py`（支持 persona 竞稿） |
+| 竞稿评审 Agent | `backend/core/judge_agent.py` |
 | LLM 客户端 | `backend/core/llm_client.py` |
 | 项目管理 | `backend/core/project_manager.py` |
 | 配置管理 | `backend/core/config.py` |

@@ -14,6 +14,8 @@ import {
   EyeOff,
   ShieldCheck,
   Info,
+  Wallet,
+  Users,
 } from 'lucide-react'
 
 interface ConfigState {
@@ -29,6 +31,10 @@ interface ConfigState {
   quality_threshold: number
   default_chapter_count: number
   default_chapter_length: number
+  budget_max_cost_usd: number
+  budget_price_input_per_mtok: number
+  budget_price_output_per_mtok: number
+  chapter_personas: string
   theme: string
 }
 
@@ -43,6 +49,10 @@ const DEFAULT_CONFIG: Partial<ConfigState> = {
   quality_threshold: 7,
   default_chapter_count: 5,
   default_chapter_length: 3000,
+  budget_max_cost_usd: 0,
+  budget_price_input_per_mtok: 3,
+  budget_price_output_per_mtok: 15,
+  chapter_personas: '',
   theme: 'light',
   api_key_set: false,
   api_key_masked: '',
@@ -90,6 +100,10 @@ export default function SettingsTab() {
         quality_threshold: (data.quality_threshold as number) ?? DEFAULT_CONFIG.quality_threshold!,
         default_chapter_count: (data.default_chapter_count as number) ?? DEFAULT_CONFIG.default_chapter_count!,
         default_chapter_length: (data.default_chapter_length as number) ?? DEFAULT_CONFIG.default_chapter_length!,
+        budget_max_cost_usd: (data.budget_max_cost_usd as number) ?? DEFAULT_CONFIG.budget_max_cost_usd!,
+        budget_price_input_per_mtok: (data.budget_price_input_per_mtok as number) ?? DEFAULT_CONFIG.budget_price_input_per_mtok!,
+        budget_price_output_per_mtok: (data.budget_price_output_per_mtok as number) ?? DEFAULT_CONFIG.budget_price_output_per_mtok!,
+        chapter_personas: (data.chapter_personas as string) || '',
         theme: (data.theme as string) || 'light',
       })
     } catch (e) {
@@ -115,6 +129,10 @@ export default function SettingsTab() {
         quality_threshold: config.quality_threshold,
         default_chapter_count: config.default_chapter_count,
         default_chapter_length: config.default_chapter_length,
+        budget_max_cost_usd: config.budget_max_cost_usd,
+        budget_price_input_per_mtok: config.budget_price_input_per_mtok,
+        budget_price_output_per_mtok: config.budget_price_output_per_mtok,
+        chapter_personas: config.chapter_personas,
         theme: config.theme,
       }
       if (config.api_key) {
@@ -368,6 +386,101 @@ export default function SettingsTab() {
               />
             </div>
           </div>
+        </motion.section>
+
+        {/* 成本门禁 */}
+        <motion.section variants={item} className="glass-card rounded-apple-lg p-6 space-y-4">
+          <h2 className="text-base font-semibold text-apple-text flex items-center gap-2">
+            <Wallet size={16} className="text-apple-blue" />
+            成本门禁
+          </h2>
+
+          <div className="flex gap-3 rounded-apple bg-apple-blue/5 px-3.5 py-3 text-sm text-apple-text-secondary">
+            <Info size={16} className="mt-0.5 shrink-0 text-apple-blue" />
+            <div className="space-y-1">
+              <p>
+                累计花费达 <span className="font-medium text-apple-text">80%</span> 时告警，
+                达上限时<span className="font-medium text-apple-text">自动暂停并保存</span>。
+              </p>
+              <p>暂停后进度无损：调高上限后可从项目库继续生成。上限填 0 表示不限制。</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm text-apple-text-secondary mb-1.5">成本上限（美元）</label>
+              <input
+                type="number"
+                min="0"
+                step="0.5"
+                value={config.budget_max_cost_usd}
+                onChange={(e) => setConfig({ ...config, budget_max_cost_usd: parseFloat(e.target.value) || 0 })}
+                className="w-full px-3 py-2 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-apple-text-secondary mb-1.5">输入单价</label>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={config.budget_price_input_per_mtok}
+                onChange={(e) => setConfig({ ...config, budget_price_input_per_mtok: parseFloat(e.target.value) || 0 })}
+                className="w-full px-3 py-2 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-apple-text-secondary mb-1.5">输出单价</label>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={config.budget_price_output_per_mtok}
+                onChange={(e) => setConfig({ ...config, budget_price_output_per_mtok: parseFloat(e.target.value) || 0 })}
+                className="w-full px-3 py-2 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
+              />
+            </div>
+          </div>
+          <p className="text-xs text-apple-text-muted">
+            单价单位为「美元 / 百万 token」，请按所用服务的实际计费填写。
+          </p>
+        </motion.section>
+
+        {/* 多人格竞稿 */}
+        <motion.section variants={item} className="glass-card rounded-apple-lg p-6 space-y-4">
+          <h2 className="text-base font-semibold text-apple-text flex items-center gap-2">
+            <Users size={16} className="text-apple-blue" />
+            多人格竞稿
+          </h2>
+
+          <div className="flex gap-3 rounded-apple bg-apple-blue/5 px-3.5 py-3 text-sm text-apple-text-secondary">
+            <Info size={16} className="mt-0.5 shrink-0 text-apple-blue" />
+            <div className="space-y-1">
+              <p className="font-medium text-apple-text">每行一个人格，格式「名称|风格描述」</p>
+              <p>
+                配置 2 个及以上后，每章由各人格各写一稿，再由评审 Agent 评分选优，
+                中选稿成为正稿。留空则使用单 Writer，不产生额外调用。
+              </p>
+              <p className="text-apple-text-muted">
+                注意：竞稿会让章节生成的调用次数按人格数倍增，建议配合上方成本门禁使用。
+              </p>
+            </div>
+          </div>
+
+          <textarea
+            rows={5}
+            value={config.chapter_personas}
+            onChange={(e) => setConfig({ ...config, chapter_personas: e.target.value })}
+            placeholder={
+              '冷峻派|短句为主，克制留白，动作与细节描写精准。\n' +
+              '抒情派|长句铺陈，注重心理活动与氛围渲染。\n' +
+              '幽默派|对白口语化，节奏轻快，善用反差制造趣味。'
+            }
+            className="w-full px-4 py-3 rounded-apple glass-inset text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-apple-blue/30 resize-y"
+          />
+          <p className="text-xs text-apple-text-muted">
+            以 # 开头的行会被忽略；某人格连续失败 3 次会自动弃权，全部失败时降级为单 Writer。
+          </p>
         </motion.section>
 
         {/* 主题 */}

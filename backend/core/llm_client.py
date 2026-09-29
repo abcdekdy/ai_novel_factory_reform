@@ -5,6 +5,7 @@ that implements the Anthropic Messages API can be used after supplying its API
 key, service base URL and model name in the Electron settings page.
 """
 
+import threading
 import time
 from typing import Callable
 from urllib.parse import urlparse
@@ -35,6 +36,15 @@ class LLMClient:
         self.model = (model or "").strip()
         self.max_retries = max(1, max_retries)
         self.timeout = timeout
+
+        # 用量累计（每次调用后从响应的 usage 字段累加），供成本门禁使用。
+        self._usage_lock = threading.Lock()
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self.budget = {
+            "max_cost_usd": 0.0,          # 0 = 不限制
+            "price_input_per_mtok": 3.0,
+            "price_output_per_mtok": 15.0,
+        }
 
         if not self.api_key:
             raise ValueError("请先在设置中填写 API Key")
@@ -133,6 +143,13 @@ class LLMClient:
                             f"[LLMClient] 警告: 流式响应首 token 等待超过 60 秒，"
                             f"服务端可能仍在推理，继续等待"
                         )
+                # 流式结束后取最终消息累计用量。部分 Anthropic 兼容网关不实现
+                # get_final_message，取不到就跳过，不影响正文。
+                try:
+                    final = stream.get_final_message()
+                    self._record_usage(getattr(final, "usage", None))
+                except Exception:
+                    pass
         except Exception:
             # Do not silently turn a provider failure into a partial chapter.
             raise
@@ -155,12 +172,73 @@ class LLMClient:
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        self._record_usage(getattr(response, "usage", None))
         text_blocks = [
             block.text
             for block in response.content
             if hasattr(block, "text") and block.text
         ]
         return "".join(text_blocks)
+
+    # ------------------------------------------------------------------
+    #  用量统计与成本门禁
+    # ------------------------------------------------------------------
+    def _record_usage(self, usage) -> None:
+        """累计一次调用的 token 用量。
+
+        Anthropic 兼容网关未必都返回 usage，字段也可能缺失——缺失时静默跳过，
+        绝不能让统计问题影响正常生成。
+        """
+        if usage is None:
+            return
+        try:
+            inp = int(getattr(usage, "input_tokens", 0) or 0)
+            out = int(getattr(usage, "output_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        with self._usage_lock:
+            self.usage["calls"] += 1
+            self.usage["input_tokens"] += inp
+            self.usage["output_tokens"] += out
+
+    def configure_budget(self, max_cost_usd: float = 0.0,
+                         price_input_per_mtok: float = 3.0,
+                         price_output_per_mtok: float = 15.0) -> None:
+        """配置成本上限与单价（美元 / 百万 token）。上限 0 表示不限制。"""
+
+        def _num(value, default):
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                return default
+
+        self.budget = {
+            "max_cost_usd": _num(max_cost_usd, 0.0),
+            "price_input_per_mtok": _num(price_input_per_mtok, 3.0),
+            "price_output_per_mtok": _num(price_output_per_mtok, 15.0),
+        }
+
+    def cost_usd(self) -> float:
+        """按配置单价估算累计花费（美元）。"""
+        with self._usage_lock:
+            inp = self.usage["input_tokens"]
+            out = self.usage["output_tokens"]
+        return (inp / 1_000_000.0) * self.budget["price_input_per_mtok"] \
+            + (out / 1_000_000.0) * self.budget["price_output_per_mtok"]
+
+    def budget_status(self) -> dict:
+        """返回成本门禁状态；调用方据此决定告警或暂停。"""
+        limit = self.budget["max_cost_usd"]
+        spent = self.cost_usd()
+        with self._usage_lock:
+            usage = dict(self.usage)
+        return {
+            "spent_usd": round(spent, 4),
+            "limit_usd": limit,
+            "ratio": round(spent / limit, 4) if limit > 0 else 0.0,
+            "exceeded": limit > 0 and spent >= limit,
+            **usage,
+        }
 
     def test_connection(self) -> dict:
         """Test the configured service with the same Messages API used by agents."""
