@@ -8,8 +8,10 @@ import re
 import time
 from pathlib import Path
 
-# 项目根目录
-PROJECTS_DIR = Path(__file__).parent.parent / "projects"
+from core.paths import projects_dir
+
+# 项目根目录（可写数据目录，见 core/paths.py）
+PROJECTS_DIR = projects_dir()
 
 
 def ensure_projects_dir():

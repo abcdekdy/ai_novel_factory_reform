@@ -3,26 +3,26 @@ Agent基类 - 定义统一接口和信号
 所有Agent继承此类，通过信号向GUI和Web面板广播状态
 """
 
-from PyQt6.QtCore import QObject, pyqtSignal
 from core.llm_client import LLMClient
+from core.signals import Signal
 
 
-class BaseAgent(QObject):
+class BaseAgent:
     """
     所有Agent的基类
     提供统一的LLM调用封装、日志信号、进度信号
     """
 
-    # 信号定义
-    log_signal = pyqtSignal(str, str)        # (agent_name, message)
-    progress_signal = pyqtSignal(str, int)   # (agent_name, percent, 0-100)
-    status_signal = pyqtSignal(str, str)     # (agent_name, status: idle/running/success/error)
-    finished_signal = pyqtSignal(str, dict)  # (agent_name, result_dict)
-
     def __init__(self, name: str, llm_client: LLMClient):
-        super().__init__()
         self.name = name
         self.llm = llm_client
+
+        # 信号按**实例**创建。若挂在类上会让所有 Agent 实例共享同一份回调列表，
+        # 导致章节之间日志与进度串台。
+        self.log_signal = Signal()        # (agent_name, message)
+        self.progress_signal = Signal()   # (agent_name, percent, 0-100)
+        self.status_signal = Signal()     # (agent_name, status: idle/running/success/error)
+        self.finished_signal = Signal()   # (agent_name, result_dict)
 
     def log(self, message: str):
         """发送日志信号"""
@@ -364,9 +364,11 @@ class BaseAgent(QObject):
     def _dump_failed_response(text: str) -> None:
         """把解析失败的原始响应落盘，便于排查 LLM 输出问题。"""
         import time
-        from pathlib import Path
+        from core.paths import projects_dir
         try:
-            dump_dir = Path("projects") / "_parse_failures"
+            # 原先用相对路径 Path("projects")，落点取决于进程 cwd，
+            # 打包后 cwd 不固定 → 改用统一的项目库根目录
+            dump_dir = projects_dir() / "_parse_failures"
             dump_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S")
             dump_path = dump_dir / f"parse_failure_{ts}.txt"

@@ -10,7 +10,6 @@ import time
 import json
 import threading
 from pathlib import Path
-from PyQt6.QtCore import QObject, pyqtSignal
 
 from core.llm_client import LLMClient
 from core.config import load_config
@@ -35,51 +34,24 @@ from core.project_manager import (
 )
 
 
-class PipelineSignals(QObject):
-    """流水线全局信号"""
-    # 阶段信号
-    stage_started = pyqtSignal(str)        # 阶段名称
-    stage_completed = pyqtSignal(str)      # 阶段名称
-    stage_error = pyqtSignal(str, str)     # (阶段名称, 错误信息)
-
-    # 进度信号
-    overall_progress = pyqtSignal(int)     # 整体进度 0-100
-    chapter_progress = pyqtSignal(int, int, str)  # (章索引, 进度, 状态)
-
-    # 结果信号
-    world_view_ready = pyqtSignal(dict)    # 世界观准备好
-    outline_ready = pyqtSignal(dict)       # 详细大纲准备好
-    chapter_ready = pyqtSignal(dict)       # 单个章节完成
-    evaluation_ready = pyqtSignal(dict)    # 评估完成
-    revision_ready = pyqtSignal(dict)      # 修订完成
-    adaptation_ready = pyqtSignal(dict)    # 适配完成
-    pipeline_finished = pyqtSignal(dict)  # 流水线完成（含全部结果）
-    # ---- 续写专用信号 ----
-    continuation_outline_ready = pyqtSignal(dict)   # 续写大纲已生成，待用户审阅
-    continuation_progress = pyqtSignal(str, int)    # (阶段文本, 进度0-100)
-
-    # ---- 世界观审查信号 ----
-    world_view_review_ready = pyqtSignal(dict)      # 世界观已生成，待用户审阅
-
-    # 日志
-    log_signal = pyqtSignal(str, str)      # (source, message)
-
-    # 创作启动（通知 UI 切换到工作台 tab）
-    generation_started = pyqtSignal()
-
-    # Token统计
-    token_update = pyqtSignal(str, int)    # (agent_name, tokens_used)
-
-
 class _Signal:
-    """简单的信号实现 - 直接调用 event_broker.publish"""
+    """流水线信号：emit 时直接发布到 EventBroker，并调用本地订阅者。
+
+    不再使用 Qt 信号——PyQt6 信号在没有事件循环时会阻塞，而本项目的 emit
+    全部来自 worker 线程。
+    """
     def __init__(self, event_name, *arg_names, **fixed_kwargs):
         self.event_name = event_name
         self.arg_names = arg_names
         self.fixed_kwargs = fixed_kwargs
+        self._callbacks = []
+        self._lock = threading.RLock()
 
     def connect(self, callback):
-        self._callback = callback
+        """注册本地订阅者（可多个；此前只保留最后一个，属隐患）。"""
+        with self._lock:
+            self._callbacks.append(callback)
+        return callback
 
     def emit(self, *args):
         from api.events import event_broker
@@ -90,15 +62,21 @@ class _Signal:
             kwargs = dict(zip(self.arg_names, args))
             kwargs.update(self.fixed_kwargs)
             event_broker.publish(self.event_name, kwargs)
-        if hasattr(self, '_callback'):
-            self._callback(*args)
+
+        with self._lock:
+            callbacks = list(self._callbacks)
+        for callback in callbacks:
+            try:
+                callback(*args)
+            except Exception:
+                import traceback
+                traceback.print_exc()
 
 
-class NovelPipeline(QObject):
+class NovelPipeline:
     """小说生成流水线引擎"""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
         # 使用 _Signal 替代 Qt 信号，避免跨线程阻塞
         self.signals = type('Signals', (), {
             'log_signal': _Signal("log", "source", "message"),
@@ -139,9 +117,7 @@ class NovelPipeline(QObject):
         self._pending_chapter_workers = 0
         self._budget_warned = False            # 成本门禁是否已发过 80% 告警
         self._persona_failures = {}            # 人格连续失败计数（竞稿模式）
-        # 竞稿候选稿的全局并发闸门（按 concurrency 懒建，见 _contest_semaphore）。
-        # 必须在此静态初始化：QObject 子类上用 getattr 探测未定义属性会抛
-        # RuntimeError 而非 AttributeError，默认值兜不住。
+        # 竞稿候选稿的全局并发闸门（按 concurrency 懒建，见 _contest_semaphore）
         self._persona_semaphore = None
         self._persona_semaphore_size = 0
 

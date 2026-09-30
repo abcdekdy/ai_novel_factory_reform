@@ -1,8 +1,8 @@
 """
-流水线控制 API — 桥接 Qt 信号到 SSE 事件总线
+流水线控制 API
 
-将 NovelPipeline 的 pyqtSignal 连接到 event_broker.publish()，
-使前端通过 SSE 实时接收 pipeline 事件。
+NovelPipeline 的信号在 emit 时自行发布到 EventBroker，因此这里无需再做
+信号桥接，前端通过 SSE 直接接收 pipeline 事件。
 """
 import json
 import logging
@@ -13,7 +13,6 @@ from fastapi import APIRouter, HTTPException
 
 from api.events import event_broker
 from core.config import load_config
-from core._headless import ensure_qt_app
 
 logger = logging.getLogger("novel-factory.pipeline-api")
 
@@ -25,7 +24,11 @@ _pipeline_lock = threading.Lock()
 
 
 def _get_pipeline():
-    """获取或创建 pipeline 实例，并连接信号到事件总线"""
+    """获取或创建 pipeline 实例。
+
+    NovelPipeline 的每个信号在 emit 时自行调用 event_broker.publish()，
+    不需要额外的信号桥接。
+    """
     global _pipeline
     if _pipeline is not None:
         return _pipeline
@@ -34,83 +37,10 @@ def _get_pipeline():
         if _pipeline is not None:
             return _pipeline
 
-        # 确保 Qt 应用存在
-        ensure_qt_app()
-
         from core.pipeline import NovelPipeline
 
-        pipeline = NovelPipeline()
-        # 注意：不再调用 _connect_signals()，因为 NovelPipeline 使用 _SimpleSignalBroker
-        # 它会自动发布事件到 EventBroker，无需额外的信号连接
-        _pipeline = pipeline
-        return pipeline
-
-
-def _connect_signals(pipeline):
-    """将 pipeline 的所有信号桥接到 SSE 事件总线
-
-    注意：PyQt6 信号在没有事件循环时会阻塞。
-    我们通过替换信号的 emit 方法来直接调用 event_broker.publish。
-    """
-    s = pipeline.signals
-
-    # 保存原始的 emit 方法
-    _original_emits = {}
-
-    def make_publisher(signal_name, event_name, *arg_names, **fixed_kwargs):
-        """创建一个发布函数，直接调用 event_broker.publish"""
-        def publisher(*args):
-            kwargs = dict(zip(arg_names, args))
-            kwargs.update(fixed_kwargs)
-            event_broker.publish(event_name, kwargs)
-        return publisher
-
-    # 替换每个信号的 emit 方法
-    signal_mappings = [
-        ("log_signal", "log", "source", "message"),
-        ("stage_started", "stage", "stage"),
-        ("stage_completed", "stage", "stage"),
-        ("stage_error", "pipeline_error", "stage", "error"),
-        ("overall_progress", "progress", "overall"),
-        ("world_view_ready", "world_view_ready", "data"),
-        ("outline_ready", "outline_ready", "data"),
-        ("chapter_ready", "chapter_ready", "data"),
-        ("evaluation_ready", "evaluation_ready", "data"),
-        ("revision_ready", "revision_ready", "data"),
-        ("adaptation_ready", "adaptation_ready", "data"),
-        ("pipeline_finished", "pipeline_finished", "data"),
-        ("continuation_outline_ready", "continuation_outline_ready", "data"),
-        ("continuation_progress", "continuation_progress", "text", "progress"),
-        ("world_view_review_ready", "world_view_review_ready", "data"),
-        ("generation_started", "generation_started"),
-        ("token_update", "token_update", "agent", "tokens"),
-        ("chapter_progress", "chapter_progress", "chapter_index", "progress", "status"),
-    ]
-
-    for mapping in signal_mappings:
-        signal_name = mapping[0]
-        event_name = mapping[1]
-        arg_names = mapping[2:]
-
-        signal = getattr(s, signal_name)
-
-        # 创建固定参数的 kwargs
-        fixed = {}
-        if signal_name == "stage_started":
-            fixed = {"status": "started"}
-        elif signal_name == "stage_completed":
-            fixed = {"status": "completed"}
-
-        # 替换 emit 方法
-        publisher = make_publisher(signal_name, event_name, *arg_names, **fixed)
-        _original_emits[signal_name] = signal.emit
-        signal.emit = publisher
-
-    # Token 统计
-    s.token_update.connect(lambda name, tokens: publish("token_update", {
-        "agent": name,
-        "tokens": tokens,
-    }))
+        _pipeline = NovelPipeline()
+        return _pipeline
 
 
 @router.post("/start")

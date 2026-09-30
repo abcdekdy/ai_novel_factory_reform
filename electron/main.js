@@ -2,7 +2,7 @@
  * Electron 主进程
  * 启动 Python 后端子进程，创建应用窗口
  */
-const { app, BrowserWindow, Menu, Tray, ipcMain, shell } = require('electron')
+const { app, BrowserWindow, Menu, Tray, ipcMain, shell, dialog } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const http = require('http')
@@ -15,6 +15,7 @@ const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`
 let mainWindow = null
 let pythonProcess = null
 let tray = null
+let backendStartError = null
 
 // ===== Python 后端管理 =====
 
@@ -29,22 +30,73 @@ function checkBackendRunning() {
   })
 }
 
-async function startPythonBackend() {
-  if (pythonProcess) return
-
-  // 先检测后端是否已运行（开发模式下可能手动启动了 uvicorn）
-  const running = await checkBackendRunning()
-  if (running) {
-    console.log('[Electron] Python 后端已在运行，跳过启动')
-    return
+/**
+ * 解析后端的启动方式。
+ *
+ * 打包态：启动 PyInstaller 冻结出的独立可执行文件。extraResource 会把
+ *         backend/dist/novel-backend 复制到 resources/novel-backend，
+ *         最终用户无需安装 Python。
+ *         注意不能用 __dirname 拼路径——打包后它指向 app.asar 内部，
+ *         而 extraResource 的内容在 resources/ 下，两者并不相同。
+ * 开发态：沿用系统 Python + uvicorn。
+ */
+function resolveBackendCommand() {
+  if (app.isPackaged) {
+    const exeName = process.platform === 'win32' ? 'novel-backend.exe' : 'novel-backend'
+    const exePath = path.join(process.resourcesPath, 'novel-backend', exeName)
+    return { command: exePath, args: [], cwd: path.dirname(exePath) }
   }
 
-  const pythonExe = process.platform === 'win32' ? 'python' : 'python3'
-
-  pythonProcess = spawn(pythonExe, ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)], {
+  return {
+    command: process.platform === 'win32' ? 'python' : 'python3',
+    args: ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
     cwd: path.join(__dirname, '..', 'backend'),
+  }
+}
+
+/** 轮询等待后端就绪；返回是否在超时前拿到健康响应。 */
+async function waitForBackend(timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await checkBackendRunning()) return true
+    // 后端进程已退出就没必要继续等
+    if (pythonProcess && pythonProcess.exitCode !== null) return false
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  return false
+}
+
+async function startPythonBackend() {
+  if (pythonProcess) return true
+
+  // 先检测后端是否已运行（开发模式下可能手动启动了 uvicorn）
+  if (await checkBackendRunning()) {
+    console.log('[Electron] Python 后端已在运行，跳过启动')
+    return true
+  }
+
+  const { command, args, cwd } = resolveBackendCommand()
+
+  const env = {
+    ...process.env,
+    PYTHONIOENCODING: 'utf-8',
+    PYTHONUTF8: '1',
+    NOVEL_BACKEND_PORT: String(BACKEND_PORT),
+  }
+
+  if (app.isPackaged) {
+    // 用户数据（config.json / projects/）放应用根目录下的 data/，
+    // 绿色版整个文件夹挪走时数据跟着走；也避免写进只读的程序目录。
+    env.NOVEL_DATA_DIR = path.join(path.dirname(app.getPath('exe')), 'data')
+    console.log(`[Electron] 数据目录: ${env.NOVEL_DATA_DIR}`)
+  }
+
+  console.log(`[Electron] 启动后端: ${command}`)
+
+  pythonProcess = spawn(command, args, {
+    cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+    env,
   })
 
   pythonProcess.stdout.on('data', (data) => {
@@ -59,12 +111,25 @@ async function startPythonBackend() {
     }
   })
 
+  pythonProcess.on('error', (err) => {
+    // 打包态最常见的原因：冻结产物缺失或被杀软隔离
+    console.error(`[Electron] 后端进程启动失败: ${err.message}`)
+    backendStartError = err.message
+    pythonProcess = null
+  })
+
   pythonProcess.on('exit', (code) => {
     console.log(`[Python] 进程退出 code=${code}`)
     pythonProcess = null
   })
 
-  console.log('[Electron] Python 后端已启动')
+  const ready = await waitForBackend()
+  if (ready) {
+    console.log('[Electron] Python 后端已就绪')
+  } else {
+    console.error('[Electron] Python 后端未在超时时间内就绪')
+  }
+  return ready
 }
 
 function stopPythonBackend() {
@@ -223,15 +288,38 @@ function createTray() {
 
 // ===== 应用生命周期 =====
 
+/** 后端起不来时给用户的排查提示（区分开发态与打包态）。 */
+function buildBackendErrorHint() {
+  if (backendStartError) {
+    return '无法启动后端进程：\n\n' + backendStartError +
+      '\n\n请确认安装完整，并检查安全软件是否拦截了 novel-backend.exe。'
+  }
+  if (!app.isPackaged) {
+    return '开发模式下后端未能就绪。\n\n请先安装后端依赖：\n' +
+      '    pip install -r backend/requirements.txt\n\n' +
+      `并确认端口 ${BACKEND_PORT} 未被占用。`
+  }
+  return `后端未能在超时时间内就绪。\n\n可能原因：\n` +
+    `1. 端口 ${BACKEND_PORT} 被其他程序占用\n` +
+    `2. 程序目录中的后端文件缺失，或被安全软件隔离\n\n` +
+    `请关闭占用该端口的程序后重试。`
+}
+
 app.whenReady().then(async () => {
-  await startPythonBackend()
+  // 先等后端就绪再开窗：本地后端通常 1-3 秒起好，
+  // 这样用户看到界面时它已经可用，不会出现首屏接口全红。
+  const ready = await startPythonBackend()
+  if (!ready) {
+    dialog.showErrorBox('AI 小说工厂 — 后端启动失败', buildBackendErrorHint())
+    app.quit()
+    return
+  }
+
   createWindow()
 
   app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      // 重新激活时，如果后端未运行，先启动后端
-      const running = await checkBackendRunning()
-      if (!running) {
+      if (!(await checkBackendRunning())) {
         await startPythonBackend()
       }
       createWindow()

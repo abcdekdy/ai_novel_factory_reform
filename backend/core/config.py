@@ -7,8 +7,10 @@ import json
 import os
 from pathlib import Path
 
-# 配置文件路径
-CONFIG_FILE = Path(__file__).parent.parent / "config.json"
+from core.paths import config_path
+
+# 配置文件路径（可写数据目录，见 core/paths.py）
+CONFIG_FILE = config_path()
 
 # 默认配置
 DEFAULT_CONFIG = {

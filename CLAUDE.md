@@ -19,18 +19,21 @@ dev.bat
 # 终端 1: cd frontend && npm run dev
 # 终端 2: npx electron .
 
-# 构建前端
-cd frontend && npm run build
-# 输出: frontend/dist/
-
-# 打包 Electron（需先构建前端）
+# 构建免安装绿色版（推荐：双击 build-portable.bat 亦可）
 npm run build
-npm run make
+# 等价于三步：
+#   npm run build:frontend  -> frontend/dist/
+#   npm run build:backend   -> backend/dist/novel-backend/（PyInstaller 冻结）
+#   npm run build:portable  -> out/AI小说工厂-win32-x64(.zip)
+
+# 打包步骤可单独重跑；产物为免安装绿色版，解压后双击
+#   out/AI小说工厂-win32-x64/ai-novel-factory.exe
+# 即可运行，**无需安装 Python**。
 ```
 
 **端口约定**：后端 8765、前端 Vite 5173、均硬编码在代码中。
 
-**注意**：无测试框架（无 pytest/vitest/jest），无 Python 格式化/lint 工具（无 ruff/black/pre-commit）。PyQt6 是代码强依赖但未列入 requirements.txt（需手动 `pip install PyQt6`）。
+**注意**：无测试框架（无 pytest/vitest/jest），无 Python 格式化/lint 工具（无 ruff/black/pre-commit）。**PyQt6 已完全移除**（后端原以 Qt 当信号总线，现用 `core/signals.py`），后端依赖见 `backend/requirements.txt`。
 
 国内网络需配置 Electron 镜像（已写入 `package.json` 的 `config` 字段，指向 npmmirror；`.npmrc` 不再放镜像键，避免 npm 警告且 @electron/get 不识别）。
 
@@ -62,10 +65,16 @@ backend/         — FastAPI + Python 核心
 - EventBroker（`api/events.py`）是 asyncio.Queue 的发布-订阅模式，QueueFull 时丢弃旧事件保持实时性
 - Pipeline 用自定义 `_Signal` 类直接把事件发布到 EventBroker（见下"Qt 信号桥接"）
 
-### Qt 信号桥接
-- `core/_headless.py` 创建 `QCoreApplication` 使 pyqtSignal 在无 GUI 环境工作
-- **`NovelPipeline` 使用自定义 `_Signal` 类替代 Qt 信号**（`core/pipeline.py`），`emit()` 直接调用 `event_broker.publish()`，避免跨线程阻塞（PyQt6 信号无事件循环时阻塞）
-- `_Signal.emit()` 特例：单参数且名为 `"data"` 时直接发布值，避免 `{"data": {...}}` 嵌套
+### 信号机制（已无 Qt）
+后端是**无界面服务端**，此前却引入 PyQt6 只为当信号总线用，代价是打包时上百 MB 的 Qt 运行时。现已彻底移除：
+
+- `core/signals.py`：极简信号类（回调列表 + 同步 emit），供 `BaseAgent` 的
+  `log/progress/status/finished` 使用。**信号按实例创建**——挂在类上会让所有
+  Agent 实例共享同一份回调列表，导致章节之间日志串台
+- `core/pipeline.py` 的 `_Signal`：`emit()` 先 `event_broker.publish()` 再调用本地
+  订阅者。单参数且名为 `"data"` 时直接发布值，避免 `{"data": {...}}` 嵌套
+- `_headless.py`（起后台 Qt 事件循环让 pyqtSignal 可用）与 `PipelineSignals`
+  死类（从未被实例化）已删除
 - 前端 `stores/useSSE.ts` 订阅 SSE 事件并分发到 Zustand store
 
 ### 状态管理
@@ -177,9 +186,29 @@ backend/         — FastAPI + Python 核心
 
 前端设置页通过 `GET /api/config` 获取配置（API Key 脱敏返回 `api_key_masked`），`PUT /api/config` 更新配置（白名单过滤字段，api_key 非空才写入）。
 
-## Electron 打包
+## Electron 打包（免安装绿色版）
 
-`electron/forge.config.js` 配置 `extraResource: ['./backend']` 把 Python 后端打入安装包。**注意**：Python 运行时 + PyQt6 依赖需终端用户自行准备，打包安装包内不含 Python 环境。
+**一条命令**：`npm run build`（或双击 `build-portable.bat`），产物为
+`out/AI小说工厂-win32-x64/` 与同名 zip。解压后双击 `ai-novel-factory.exe` 即可运行，
+**终端用户无需安装 Python**。
+
+三步流程与各自职责：
+
+| 步骤 | 命令 | 产物 | 说明 |
+|---|---|---|---|
+| 前端 | `npm run build:frontend` | `frontend/dist/` | Vite 构建 |
+| 后端 | `npm run build:backend` | `backend/dist/novel-backend/` | PyInstaller 冻结（含 Python 运行时，约 30MB）|
+| 组装 | `npm run build:portable` | `out/…` | `package_portable.py` 组装并压缩 |
+
+产物结构：`ai-novel-factory.exe` + `resources/app/`（应用代码）+ `resources/novel-backend/`（冻结后端）+ `data/`（首次运行自动创建）。
+
+**关键决策与踩坑**：
+
+- **不用 electron-forge**：其依赖的 `extract-zip` 在本机环境下解压 Electron 时会在写出第一个文件后静默终止（压缩包本身完好：73 条目全部通过校验，Python 可完整解压）。改为直接复用 `node_modules/electron/dist`——npm 安装 Electron 时已解压好的完整运行时，确定性且更快。`forge.config.js` 已删除；它此前放在 `electron/` 子目录，而 Forge 只在项目根目录查找配置，**从未生效过**
+- **数据目录**（`core/paths.py`）：`config.json` 与 `projects/` 必须落在可写位置。此前由 `Path(__file__).parent.parent` 推导，冻结后会指向 PyInstaller 包内部（只读，且 onefile 下是退出即删的临时目录）。现按 `NOVEL_DATA_DIR` 环境变量 → 冻结态 exe 同级 `data/` → 开发态 `backend/` 的顺序解析
+- **打包态路径**：`__dirname` 指向 `app.asar` 内部，而 `extraResource` 的内容在 `resources/` 下，两者不同——`electron/main.js` 按 `app.isPackaged` 分别解析后端可执行文件位置
+- **启动时序**：先等 `/api/health` 就绪再开窗（本地后端约 1–3 秒），避免首屏接口全部失败；失败时弹明确的中文排查提示而非静默白屏
+- **已知限制**：`assets/` 下只有 `tray-icon.png`，**没有 icon.ico**，且未装 rcedit，因此 exe 用的是 Electron 默认图标。如需自定义图标，补 `assets/icon.ico` 并引入 rcedit 改写
 
 窗口配置：1200×780、最小 900×600、Mac 隐藏 frame / Windows 保留 frame、contextIsolation:true / nodeIntegration:false。系统托盘使用 `assets/tray-icon.png`。
 
@@ -369,9 +398,39 @@ backend/         — FastAPI + Python 核心
 
 **验证**：`build_system_prompt` 占位符替换、阈值端到端传递（配置 → 评估 Agent 入参）、非法/缺省值回退全部通过；前端 `tsc --noEmit` 通过、无 `theme` 残留引用。
 
+### 2026-09-30 打包专项（做成点击即用的绿色版）
+
+31. **打包态后端根本起不来（两个独立原因）**
+    - 问题①：`electron/main.js` 用 `path.join(__dirname, '..', 'backend')` 定位后端，打包后 `__dirname` 指向 `app.asar` 内部，而 `extraResource` 的内容在 `resources/` 下——两者不同，后端永远定位不到
+    - 问题②：后端靠 `spawn('python', ...)` 启动，要求终端用户自行安装 Python + PyQt6，谈不上"点击即用"
+    - 修复：按 `app.isPackaged` 分别解析；打包态启动 PyInstaller 冻结的独立可执行文件。另加 `/api/health` 就绪等待（先等后端可用再开窗，避免首屏接口全红），失败时弹明确的中文排查提示
+    - 文件：`electron/main.js`
+
+32. **移除 PyQt6（为打包扫清最大障碍）**
+    - 问题：一个无界面服务端引入 GUI 框架 Qt，只为当信号总线用；冻结后多出上百 MB，且 PyInstaller 打包 Qt 需额外处理插件
+    - 现状核查：`PipelineSignals(QObject)` 是**从未被实例化**的死类；`api/pipeline.py` 的 `_connect_signals()` 同样从未被调用，且内部引用了未定义的 `publish`（真跑会 NameError）；真正在用 PyQt 的只有 `BaseAgent` 的 4 个 pyqtSignal
+    - 修复：新增 `core/signals.py`（约 30 行），`BaseAgent` / `NovelPipeline` 去掉 QObject 基类，删除死代码与 `_headless.py`。**信号按实例创建**——挂类上会让所有 Agent 共享回调列表导致日志串台
+    - 顺带收益：`_Signal.connect` 原只保留最后一个订阅者（隐患），现支持多个且订阅者异常互不影响
+    - 效果：冻结产物 **29MB**（含 PyQt 时会是 200MB+）
+    - 文件：`backend/core/signals.py`（新增）、`base_agent.py`、`pipeline.py`、`api/pipeline.py`
+
+33. **用户数据会被写进只读的程序目录**
+    - 问题：`config.json` 与 `projects/` 均由 `Path(__file__).parent.parent` 推导（即 backend/）。冻结后该路径指向 PyInstaller 包内部：只读；onefile 模式下更是退出即删的临时目录，等于用户作品凭空消失
+    - 修复：新增 `core/paths.py` 统一解析——`NOVEL_DATA_DIR`（Electron 打包态注入，指向应用根目录下的 `data/`，绿色版整包挪走数据跟着走）→ 冻结态 exe 同级 `data/` → 开发态 `backend/`（保持既有行为，老项目与老配置不失效）
+    - 附带修正：`base_agent.py` 落盘解析失败样本用的是相对 cwd 的裸路径 `Path("projects")`，打包后 cwd 不固定 → 改走统一入口
+    - 文件：`backend/core/paths.py`（新增）、`config.py`、`project_manager.py`、`api/projects.py`、`base_agent.py`
+
+34. **打包链路的两个"从未生效"与一个不可用**
+    - 问题①：`forge.config.js` 一直放在 `electron/` 子目录，而 Forge 只在项目根目录查找配置 —— 它**从未被加载过**（首次运行 `make` 直接报"没有为 win32 配置任何 make 目标"）
+    - 问题②：该配置引用的 `assets/icon.ico` 根本不存在（`assets/` 下只有 81 字节的 `tray-icon.png`）
+    - 问题③：改用根目录配置后，`electron-forge` 依赖的 `extract-zip` 解压 Electron 时会在写出第一个文件后静默终止。已确认压缩包完好（73 条目全部通过校验，Python 可完整解压），是解压环节在本机环境下的问题
+    - 修复：放弃 forge，新增 `package_portable.py` 直接复用 `node_modules/electron/dist`（npm 安装 Electron 时已解压好的完整运行时）组装绿色版并压缩；`build-portable.bat` 与 `npm run build` 串起三步
+    - 文件：`package_portable.py`（新增）、`build-portable.bat`（新增）、`backend/build_backend.py`（新增）、`backend/run_server.py`（新增）、`package.json`；`forge.config.js` 删除
+
+**验证**：实际构建出 123.8 MB 的 zip；解压后直接双击 `ai-novel-factory.exe`，后端进程自动拉起、`/api/health` 返回正常、`data/`（含 config.json 与 projects/）在 exe 同级自动创建、渲染进程与 8765 建立 SSE 长连接（证明界面确实加载并发起了请求）、退出时后端进程被正确回收。**全程未使用系统 Python**。
+
 ## 开发规范
 
-- **QObject 子类属性必须静态初始化**：在 QObject 子类实例上用 `getattr(obj, name, default)` 探测**尚不存在**的属性时，PyQt6 抛的是 `RuntimeError`（"super-class `__init__()` was never called"）而非 `AttributeError`，`getattr` 的默认值兜不住。新增状态字段一律在 `__init__` 中初始化（踩坑记录见 `_persona_semaphore`）
 
 - **中文 UI**：所有界面文字使用中文
 - **无 emoji**：不在 UI 中使用 emoji（日志内容除外）
@@ -407,7 +466,8 @@ backend/         — FastAPI + Python 核心
 | Tailwind 配置 | `frontend/tailwind.config.js` |
 | Electron 主进程 | `electron/main.js`（含 IPC: open-path / show-in-folder） |
 | Electron preload | `electron/preload.js`（暴露 electronAPI） |
-| Electron 打包 | `electron/forge.config.js` |
+| 绿色版组装/压缩 | `package_portable.py` |
+| 一键构建绿色版 | `build-portable.bat` |
 | FastAPI 入口 | `backend/main.py` |
 | SSE 事件总线 | `backend/api/events.py` |
 | 流水线路由 | `backend/api/pipeline.py` |
@@ -420,5 +480,8 @@ backend/         — FastAPI + Python 核心
 | LLM 客户端 | `backend/core/llm_client.py` |
 | 项目管理 | `backend/core/project_manager.py` |
 | 配置管理 | `backend/core/config.py` |
-| Qt 无头模式 | `backend/core/_headless.py` |
+| 后端信号（替代 Qt） | `backend/core/signals.py` |
+| 可写数据目录解析 | `backend/core/paths.py` |
+| 打包专用后端入口 | `backend/run_server.py` |
+| 后端冻结脚本 | `backend/build_backend.py` |
 | 运行时配置 | `backend/config.json` |

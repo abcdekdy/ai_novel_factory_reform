@@ -1,6 +1,6 @@
 {
   "name": "ai-novel-factory",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "AI 小说工厂 - Electron + React + FastAPI 重构版",
   "main": "electron/main.js",
   "config": {
@@ -12,11 +12,10 @@
     "dev:backend": "cd backend && uvicorn main:app --reload --port 8765",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:electron": "wait-on http://localhost:5173 && electron .",
-    "build": "npm run build:frontend && npm run build:electron",
+    "build": "npm run build:frontend && npm run build:backend && npm run build:portable",
     "build:frontend": "cd frontend && npm run build",
-    "build:electron": "electron-forge make",
-    "package": "electron-forge package",
-    "make": "electron-forge make"
+    "build:backend": "cd backend && python build_backend.py",
+    "build:portable": "python package_portable.py"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.4.0",

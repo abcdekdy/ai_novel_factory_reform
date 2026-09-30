@@ -42,3 +42,6 @@ config.json
 
 # Logs
 *.log
+
+# TypeScript 增量构建缓存（不应入库）
+*.tsbuildinfo

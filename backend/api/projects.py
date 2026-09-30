@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
+from core.paths import projects_dir
 from core.project_manager import (
     list_projects,
     load_project_summary,
@@ -104,7 +105,7 @@ async def delete_project(project_name: str):
     if not target.exists():
         raise HTTPException(status_code=404, detail="项目目录不存在")
     # 安全检查：确保路径在 projects 目录下
-    projects_root = (Path(__file__).parent.parent / "projects").resolve()
+    projects_root = projects_dir().resolve()
     try:
         target.resolve().relative_to(projects_root)
     except ValueError:
