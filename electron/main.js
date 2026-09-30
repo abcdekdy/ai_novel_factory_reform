@@ -105,8 +105,12 @@ async function startPythonBackend() {
 
   pythonProcess.stderr.on('data', (data) => {
     const line = data.toString().trim()
-    // 过滤掉 uvicorn 的 INFO 噪音
-    if (line && !line.match(/^INFO:\s+(Will watch|Uvicorn running|Started|Waiting|Application)/)) {
+    if (!line) return
+    // uvicorn 把日志写到 stderr，级别混在行内（且常带时间戳前缀），
+    // 因此按「行内是否含 INFO/DEBUG 标记」判断，而不是匹配行首。
+    // 否则正常的启动日志也会被打成 [Python ERR]，排查时误导人。
+    const isInfoLevel = /\b(INFO|DEBUG):/.test(line)
+    if (!isInfoLevel) {
       console.error(`[Python ERR] ${line}`)
     }
   })
@@ -232,6 +236,9 @@ function createWindow() {
     frame: isMac ? false : true,
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     backgroundColor: '#F5F5F7',
+    // 窗口/任务栏图标。exe 文件本身的图标由打包时用 rcedit 写入，
+    // 两者都设置才能在任务栏与资源管理器里都显示正确。
+    icon: path.join(__dirname, '..', 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

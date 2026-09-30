@@ -1,6 +1,6 @@
 {
   "name": "ai-novel-factory",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "AI 小说工厂 - Electron + React + FastAPI 重构版",
   "main": "electron/main.js",
   "config": {
@@ -25,6 +25,7 @@
     "@electron-forge/plugin-fuses": "^7.4.0",
     "concurrently": "^9.0.0",
     "electron": "^32.0.0",
+    "rcedit": "^5.0.2",
     "wait-on": "^8.0.0"
   }
 }

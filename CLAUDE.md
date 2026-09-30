@@ -208,7 +208,14 @@ backend/         — FastAPI + Python 核心
 - **数据目录**（`core/paths.py`）：`config.json` 与 `projects/` 必须落在可写位置。此前由 `Path(__file__).parent.parent` 推导，冻结后会指向 PyInstaller 包内部（只读，且 onefile 下是退出即删的临时目录）。现按 `NOVEL_DATA_DIR` 环境变量 → 冻结态 exe 同级 `data/` → 开发态 `backend/` 的顺序解析
 - **打包态路径**：`__dirname` 指向 `app.asar` 内部，而 `extraResource` 的内容在 `resources/` 下，两者不同——`electron/main.js` 按 `app.isPackaged` 分别解析后端可执行文件位置
 - **启动时序**：先等 `/api/health` 就绪再开窗（本地后端约 1–3 秒），避免首屏接口全部失败；失败时弹明确的中文排查提示而非静默白屏
-- **已知限制**：`assets/` 下只有 `tray-icon.png`，**没有 icon.ico**，且未装 rcedit，因此 exe 用的是 Electron 默认图标。如需自定义图标，补 `assets/icon.ico` 并引入 rcedit 改写
+- **应用图标（两处，缺一不可）**：
+  - **窗口/任务栏图标** → `electron/main.js` 的 `BrowserWindow({ icon: assets/icon.png })`
+  - **资源管理器里的 exe 文件图标** → 来自 PE 资源，`BrowserWindow` 管不着，必须用
+    `set_exe_icon.mjs`（rcedit，ESM **命名导出**）在组装时改写。少了这步，解压后在
+    文件夹里看到的还是 Electron 默认的原子标
+  - 图标源：`assets/icon-source.png`（1908×1908 RGBA，由 AI 生成图抠底而来）
+    → `assets/icon.png`（1024）/ `assets/icon.ico`（内嵌 16–256 七档）/ `assets/tray-icon.png`（32，圆形透明）
+  - 重做图标时注意：透明图缩放要**预乘 alpha**，否则透明区颜色渗入边缘产生浅色描边
 
 窗口配置：1200×780、最小 900×600、Mac 隐藏 frame / Windows 保留 frame、contextIsolation:true / nodeIntegration:false。系统托盘使用 `assets/tray-icon.png`。
 
@@ -428,6 +435,19 @@ backend/         — FastAPI + Python 核心
     - 文件：`package_portable.py`（新增）、`build-portable.bat`（新增）、`backend/build_backend.py`（新增）、`backend/run_server.py`（新增）、`package.json`；`forge.config.js` 删除
 
 **验证**：实际构建出 123.8 MB 的 zip；解压后直接双击 `ai-novel-factory.exe`，后端进程自动拉起、`/api/health` 返回正常、`data/`（含 config.json 与 projects/）在 exe 同级自动创建、渲染进程与 8765 建立 SSE 长连接（证明界面确实加载并发起了请求）、退出时后端进程被正确回收。**全程未使用系统 Python**。
+
+### 2026-09-30 应用图标
+
+35. **补上应用图标（此前 exe 用的是 Electron 默认原子标）**
+    - 素材：AI 生成的 2048×2048 方图，浅灰渐变背景（非纯色，边缘标准差 16.5，简单色键会留噪边）
+    - 抠底：用**连通域**从画面边缘泛洪判定背景（`scipy.ndimage.label`），而非按颜色直接键出——后者会把图形内部的白色书页一并删掉。腐触 1px 去掉抗锯齿残留的浅色描边后轻微羽化
+    - 缩放：透明图必须**预乘 alpha** 再 resize，否则透明区残留的颜色会渗进边缘，形成一圈浅色描边
+    - 两处图标缺一不可：`BrowserWindow({icon})` 管窗口与任务栏；**资源管理器显示的 exe 文件图标来自 PE 资源**，需用 rcedit 改写（`set_exe_icon.mjs`）。踩坑：rcedit v5 是 ESM 且为**命名导出**，写成 `import rcedit from 'rcedit'` 直接抛 SyntaxError
+    - 解决 `shutil.rmtree` 删不掉产物目录：Electron 目录嵌套深 + 项目路径长，超过 MAX_PATH；已加系统命令（`rmdir /s /q`）兜底
+    - 顺带修正 `electron/main.js` 的 stderr 过滤：原先匹配行首 `^INFO:`，而 uvicorn 日志常带时间戳前缀，导致正常启动日志被打成 `[Python ERR]`，排查时误导人。改为按行内是否含级别标记判断
+    - 文件：`assets/icon*.png`、`assets/icon.ico`、`assets/tray-icon.png`、`set_exe_icon.mjs`（新增）、`electron/main.js`、`package_portable.py`
+
+**验证**：用系统 API（`Icon.ExtractAssociatedIcon`）把 exe 内嵌图标提取出来与 `assets/icon.png` 比对，平均像素差仅 5.6（Electron 默认图标会差很多），确认已生效；应用重新打包后启动、健康检查、数据目录、退出回收后端进程均正常。
 
 ## 开发规范
 

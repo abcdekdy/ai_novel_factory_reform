@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -53,8 +54,10 @@ def fail(message: str) -> None:
 def robust_rmtree(target: Path) -> bool:
     """删除目录，返回是否已彻底删除。
 
-    Windows 上 shutil.rmtree 常因个别文件带只读属性而半途失败，且
-    ignore_errors=True 会把原因一起吞掉。这里在出错时清掉只读位再重试。
+    两个 Windows 坑叠加，光靠 shutil.rmtree 删不干净：
+      1. 个别文件带只读属性 → 出错时清掉只读位再重试
+      2. **长路径**（Electron 目录嵌套深 + 项目路径本身很长，轻易超过
+         MAX_PATH）→ shutil.rmtree 直接失败，改用系统命令兜底
     """
 
     def _on_error(func, path, _exc_info):  # noqa: ANN001
@@ -71,6 +74,19 @@ def robust_rmtree(target: Path) -> bool:
         if not target.exists():
             return True
         time.sleep(0.3)
+
+    if not target.exists():
+        return True
+
+    # 兜底：交给系统命令（走不同的路径处理，能应付超长路径）
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["cmd", "/c", "rmdir", "/s", "/q", str(target)],
+                           check=False)
+        else:
+            subprocess.run(["rm", "-rf", str(target)], check=False)
+    except Exception:
+        pass
     return not target.exists()
 
 
@@ -134,6 +150,23 @@ def main() -> int:
 
     # 重命名入口 exe；Electron 依据 exe 所在位置定位 resources/app，改名是安全的
     (OUT_DIR / "electron.exe").rename(OUT_DIR / EXE_NAME)
+
+    # 把图标写进 exe 的 PE 资源。BrowserWindow({icon}) 只管窗口/任务栏图标，
+    # **资源管理器里显示的 exe 文件图标来自 PE 资源**，必须在这一步改写，
+    # 否则解压后在文件夹里看到的是 Electron 默认图标。
+    icon = ROOT / "assets" / "icon.ico"
+    icon_script = ROOT / "set_exe_icon.mjs"
+    if icon.exists() and icon_script.exists():
+        print("写入 exe 图标...")
+        try:
+            subprocess.run(
+                ["node", str(icon_script), str(OUT_DIR / EXE_NAME), str(icon)],
+                cwd=str(ROOT), check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            print(f"  写入图标失败（不影响运行）: {exc}")
+    else:
+        print("跳过 exe 图标（缺少 assets/icon.ico 或 set_exe_icon.mjs）")
 
     resources = OUT_DIR / "resources"
 
