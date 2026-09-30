@@ -57,9 +57,20 @@ SYSTEM_PROMPT = """你是一位资深的网文小说编辑和审稿专家，负�
 }
 
 评判标准：
-- 总分 ≥ 7.0 且无明显逻辑硬伤：pass=true
-- 总分 < 7.0 或有严重逻辑矛盾：pass=false, needs_revision=true
-- issues为空数组则无需修订"""
+- 总分 ≥ __PASS_THRESHOLD__ 且无明显逻辑硬伤：pass=true
+- 总分 < __PASS_THRESHOLD__ 或有严重逻辑矛盾：pass=false, needs_revision=true
+- issues为空数组则无需修订
+
+注意：__PASS_THRESHOLD__ 是用户配置的通过线，请严格以它为准，不要自行改成别的数字。"""
+
+# 通过线占位符。prompt 内含 JSON 花括号，不能用 str.format；
+# 用 sentinel + replace 注入配置值。
+_THRESHOLD_SENTINEL = "__PASS_THRESHOLD__"
+
+
+def build_system_prompt(threshold: float) -> str:
+    """按配置的通过线渲染评估 system prompt。"""
+    return SYSTEM_PROMPT.replace(_THRESHOLD_SENTINEL, f"{threshold:.1f}")
 
 
 class QualityEvaluatorAgent(BaseAgent):
@@ -91,6 +102,7 @@ class QualityEvaluatorAgent(BaseAgent):
             "summary": str,
             "target_length": int,                 # 目标字数（可选，默认 3000）
             "consistency_rules": list[str],       # 全局一致性规则（可选）
+            "quality_threshold": float,           # 通过线（可选，默认 7.0）
         }
         输出: 评估结果字典（含 rule_issues / rule_stats / rule_pass）
         """
@@ -99,6 +111,14 @@ class QualityEvaluatorAgent(BaseAgent):
         chapter_index = input_data.get("chapter_index", 1)
         world_view = input_data.get("world_view", {})
         chapter_outline = input_data.get("chapter_outline", {})
+
+        # 通过线由配置决定，注入 prompt 让模型按同一标准判定 pass。
+        # 注意：这里只影响模型自评依据，不做服务端硬卡——LLM 总分有 ±0.5 以上
+        # 噪声，卡硬线会让同一份稿子时通过时不通过，制造不稳定的修订触发。
+        try:
+            threshold = float(input_data.get("quality_threshold", 7.0))
+        except (TypeError, ValueError):
+            threshold = 7.0
 
         self.set_status("running")
         self.log(f"开始评估第{chapter_index}章质量: {title}")
@@ -134,7 +154,7 @@ class QualityEvaluatorAgent(BaseAgent):
 
         try:
             result = self.call_llm(
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=build_system_prompt(threshold),
                 user_prompt=user_prompt,
                 temperature=0.3,  # 评估任务用较低温度保证一致性
                 max_tokens=6144,  # 评估输出 JSON（6 维评分+issues+highlights），6k 足够

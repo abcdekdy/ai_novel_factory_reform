@@ -6,7 +6,6 @@ import {
   Key,
   Zap,
   Sliders,
-  Palette,
   Check,
   X,
   Loader2,
@@ -35,7 +34,6 @@ interface ConfigState {
   budget_price_input_per_mtok: number
   budget_price_output_per_mtok: number
   chapter_personas: string
-  theme: string
 }
 
 const DEFAULT_CONFIG: Partial<ConfigState> = {
@@ -53,7 +51,6 @@ const DEFAULT_CONFIG: Partial<ConfigState> = {
   budget_price_input_per_mtok: 3,
   budget_price_output_per_mtok: 15,
   chapter_personas: '',
-  theme: 'light',
   api_key_set: false,
   api_key_masked: '',
 }
@@ -104,7 +101,6 @@ export default function SettingsTab() {
         budget_price_input_per_mtok: (data.budget_price_input_per_mtok as number) ?? DEFAULT_CONFIG.budget_price_input_per_mtok!,
         budget_price_output_per_mtok: (data.budget_price_output_per_mtok as number) ?? DEFAULT_CONFIG.budget_price_output_per_mtok!,
         chapter_personas: (data.chapter_personas as string) || '',
-        theme: (data.theme as string) || 'light',
       })
     } catch (e) {
       console.error('加载配置失败:', e)
@@ -133,7 +129,6 @@ export default function SettingsTab() {
         budget_price_input_per_mtok: config.budget_price_input_per_mtok,
         budget_price_output_per_mtok: config.budget_price_output_per_mtok,
         chapter_personas: config.chapter_personas,
-        theme: config.theme,
       }
       if (config.api_key) {
         payload.api_key = config.api_key
@@ -327,6 +322,9 @@ export default function SettingsTab() {
               onChange={(e) => setConfig({ ...config, quality_threshold: parseFloat(e.target.value) })}
               className="w-full accent-apple-blue"
             />
+            <p className="mt-1.5 text-xs text-apple-text-muted">
+              评估模型判定「通过」的分数线。调高会更严格，章节更易被判需修订，修订次数与成本随之上升。
+            </p>
           </div>
 
           {/* 数值输入网格 */}
@@ -481,32 +479,6 @@ export default function SettingsTab() {
           <p className="text-xs text-apple-text-muted">
             以 # 开头的行会被忽略；某人格连续失败 3 次会自动弃权，全部失败时降级为单 Writer。
           </p>
-        </motion.section>
-
-        {/* 主题 */}
-        <motion.section variants={item} className="glass-card rounded-apple-lg p-6 space-y-4">
-          <h2 className="text-base font-semibold text-apple-text flex items-center gap-2">
-            <Palette size={16} className="text-apple-blue" />
-            主题
-          </h2>
-          <div className="flex gap-2">
-            {[
-              { id: 'light', label: '浅色' },
-              { id: 'dark', label: '深色' },
-            ].map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setConfig({ ...config, theme: t.id })}
-                className={`px-4 py-2 rounded-apple text-sm font-medium transition-all ${
-                  config.theme === t.id
-                    ? 'bg-apple-blue text-white shadow-apple'
-                    : 'glass-inset text-apple-text-secondary hover:text-apple-text'
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
         </motion.section>
 
         {/* 保存按钮 */}

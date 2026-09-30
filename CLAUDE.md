@@ -351,9 +351,23 @@ backend/         — FastAPI + Python 核心
 **验证**：新增 3 组验证脚本（成本门禁 18 项、并发评估 12 项、竞稿与人格解析 15 项）全部通过；前端 `tsc --noEmit` 通过。验证脚本为一次性搭建，已清理，未入库。
 
 **已知遗留（未处理）**：
-- `quality_threshold`（质量阈值）在后端**从未被使用**——通过/需修订完全由 LLM 的 `pass` 字段 + `rule_checker` 硬伤数决定，设置页那个滑杆目前不产生任何效果。修掉它会改变通过判定、进而影响修订轮数与成本，故留给用户决策
-- `theme` 不在后端 `DEFAULT_CONFIG` 中，被 `PUT /api/config` 的白名单过滤掉，服务端不持久化
 - 章节生成阶段未见端到端真实 API 验证（验证均使用假 LLM 驱动循环逻辑）
+
+### 2026-09-30 收尾
+
+29. **`quality_threshold` 接入评估 prompt**
+    - 问题：该配置在后端**从未被使用**——"总分 ≥ 7.0" 是写死在评估 system prompt 里的字符串，设置页滑杆拖到任何值行为都不变
+    - 修复：prompt 中的通过线改为 `__PASS_THRESHOLD__` 占位符（prompt 内含 JSON 花括号，不能用 `str.format` 注入），由 `build_system_prompt(threshold)` 按配置渲染；pipeline 在初评与重评两处都传 `quality_threshold`
+    - **刻意不做**服务端硬卡（`if overall_score < threshold: pass=False`）：LLM 总分噪声 ±0.5 以上，卡硬线会让同一份稿子时而通过时而不通过，制造不稳定的修订触发。通过与否仍由 LLM 的 `pass` 字段 + 硬伤数决定
+    - 文件：`backend/core/quality_agent.py`、`backend/core/pipeline.py`
+
+30. **移除不生效的「主题」切换**
+    - 问题：设置页的浅色/深色按钮完全不生效——`theme` 被 `PUT /api/config` 白名单过滤（后端 `DEFAULT_CONFIG` 无此键），且前端除设置页外**无任何文件读取它**：既不应用到界面，也不持久化，是个纯装饰控件
+    - 修复：删除该区块及 `theme` 的全部前后端引用，避免"看着能调、其实没用"的死控件
+    - 深色模式确认是**从零的功能**：`tailwind.config.js` 无 `darkMode`、`index.css` 无 `.dark` 选择器、无 `dark:` 变体。真要做需先起 CSS 变量层（毛玻璃层次 + Apple 设计 token 的深色版本），应单独排期
+    - 文件：`frontend/src/pages/SettingsTab.tsx`
+
+**验证**：`build_system_prompt` 占位符替换、阈值端到端传递（配置 → 评估 Agent 入参）、非法/缺省值回退全部通过；前端 `tsc --noEmit` 通过、无 `theme` 残留引用。
 
 ## 开发规范
 

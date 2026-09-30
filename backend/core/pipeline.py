@@ -392,6 +392,13 @@ class NovelPipeline(QObject):
             return list(outline.get("consistency_rules", []))
         return []
 
+    def _quality_threshold(self) -> float:
+        """配置的质量通过线，注入评估 prompt 供模型判定 pass。"""
+        try:
+            return float(self.config.get("quality_threshold", 7.0))
+        except (TypeError, ValueError):
+            return 7.0
+
     def _active_outline(self) -> dict | None:
         """当前生效的详细大纲：续写场景为该批次大纲，否则为全书大纲。"""
         return self._outline_for_chapters or self.outline
@@ -767,6 +774,7 @@ class NovelPipeline(QObject):
                         "summary": chapter.get("summary", ""),
                         "target_length": self._chapter_length,
                         "consistency_rules": self._get_consistency_rules(),
+                        "quality_threshold": self._quality_threshold(),
                     })
             except Exception as e:
                 self.signals.log_signal.emit(
@@ -1191,6 +1199,7 @@ class NovelPipeline(QObject):
                             "summary": chapter.get("summary", ""),
                             "target_length": self._chapter_length,
                             "consistency_rules": self._get_consistency_rules(),
+                            "quality_threshold": self._quality_threshold(),
                         })
 
                         prev_score = evaluation.get("overall_score", 0)
