@@ -11,8 +11,9 @@ echo ========================================
 echo   AI 小说工厂 - 免安装绿色版构建
 echo ========================================
 echo.
-echo 产物：out\AI小说工厂-win32-x64\ 与同名 zip
+echo 产物：out\AI-Novel-Factory-win32-x64\ 与同名 zip
 echo 解压后双击 ai-novel-factory.exe 即可运行，无需安装 Python。
+echo 注意：解压路径必须是纯英文，含中文/全角字符的路径会导致 Electron 启动崩溃。
 echo.
 
 echo [1/3] 构建前端...

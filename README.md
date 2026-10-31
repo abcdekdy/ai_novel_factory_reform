@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <b>当前版本：2.2.0</b> · <a href="https://github.com/abcdekdy/ai_novel_factory_reform">GitHub 仓库</a>
+  <b>当前版本：2.2.1</b> · <a href="https://github.com/abcdekdy/ai_novel_factory_reform">GitHub 仓库</a>
 </p>
 
 ---
@@ -147,14 +147,18 @@ pip install pyinstaller
 
 ### 5.1 使用免安装绿色版（推荐）
 
-1. 获取 `AI小说工厂-win32-x64.zip`：从 GitHub Releases 下载（若已发布绿色版），或按 [第 8 节](#8-构建与部署) 自行构建
-2. 解压到任意可写目录（**不要放 C:\Program Files 等只读目录**）
-3. 双击 `ai-novel-factory.exe`
+> **路径必须是纯英文！** Electron 在包含中文、全角字符（如 `（` `）`）的路径下会在初始化阶段崩溃，表现为双击后完全没反应。请把程序放到类似 `C:\AINovelFactory` 或 `D:\AI-Novel-Factory` 的目录，不要放在 `桌面\小说生成助手（新版）\...` 这类路径下。
+
+1. 获取 `AI-Novel-Factory-win32-x64.zip`：从 GitHub Releases 下载（若已发布绿色版），或按 [第 8 节](#8-构建与部署) 自行构建
+2. 解压到**纯英文且可写**的目录（例如 `C:\AI-Novel-Factory`；**不要**放 `C:\Program Files` 等只读目录）
+3. 双击目录内的 `ai-novel-factory.exe`
 4. 首次启动会自动在 exe 同级创建 `data/`，并拉起本地后端（约 1–3 秒）
 5. 进入 **设置** 页填写接口信息，点击「测试连接」通过后即可开始创作
 
 > 升级时替换 `ai-novel-factory.exe` 与 `resources/`，**保留 `data/`** 即可保留配置与作品。
 > 整个文件夹可以整体搬移，数据跟着走。
+>
+> 如果从源码目录启动：双击根目录的 `启动绿色版.bat`，它会把绿色版同步到纯英文目录 `%LOCALAPPDATA%\AINovelFactory\app` 再启动，避免中文路径问题。
 
 ### 5.2 源码安装与开发模式
 
@@ -186,6 +190,8 @@ cd ..
 ```bash
 npm run dev
 ```
+
+> **开发模式的路径要求**：`dev.bat` 会从项目当前路径启动 Electron，因此项目路径同样必须是纯英文。如果项目在中文目录（例如 `桌面\小说生成助手（新版）`），请改用根目录的 `dev-ascii.bat`：它会把项目同步到 `%LOCALAPPDATA%\AINovelFactoryDev`（纯英文）后运行，配置与作品仍指向原项目 `backend\`。
 
 `npm run dev` 会并行启动三个进程：
 
@@ -343,11 +349,11 @@ npm run build
 
 ```
 out/
-├─ AI小说工厂-win32-x64/          # 免安装目录
-└─ AI小说工厂-win32-x64.zip       # 分发用压缩包
+├─ AI-Novel-Factory-win32-x64/          # 免安装目录
+└─ AI-Novel-Factory-win32-x64.zip       # 分发用压缩包
 ```
 
-解压后双击目录内的 `ai-novel-factory.exe` 即可运行。
+解压后双击目录内的 `ai-novel-factory.exe` 即可运行。**产物目录名保持纯英文**，但解压时选择的父目录也必须是纯英文（例如 `C:\AI-Novel-Factory`），否则 Electron 仍会因路径含中文而崩溃。
 
 ### 8.2 构建步骤拆解
 
@@ -370,7 +376,7 @@ python -m PyInstaller --version   # 未安装则 pip install pyinstaller
 ### 8.3 产物结构与升级
 
 ```
-AI小说工厂-win32-x64/
+AI-Novel-Factory-win32-x64/
 ├─ ai-novel-factory.exe        # 入口（PE 图标已写入）
 ├─ resources/
 │  ├─ app/                     # Electron 应用代码（main/preload/frontend）
@@ -381,11 +387,18 @@ AI小说工厂-win32-x64/
 - **升级**：用新版本替换 `ai-novel-factory.exe` 与 `resources/`，保留 `data/`
 - **迁移**：整个文件夹拷走即可（数据跟着走）
 - **自定义数据位置**：启动前设置环境变量 `NOVEL_DATA_DIR=<绝对路径>`
+- **路径要求**：exe 所在路径必须是纯英文（不能含中文、全角括号、日文等非 ASCII 字符）
 
 ### 8.4 开发模式部署
 
 ```bat
 dev.bat
+```
+
+若项目路径含中文，改用：
+
+```bat
+dev-ascii.bat
 ```
 
 或手动：
@@ -394,6 +407,7 @@ dev.bat
 npm run dev
 ```
 
+- **项目路径必须是纯英文**：Electron 从含中文/全角字符的路径启动会直接崩溃；`dev-ascii.bat` 会先把项目镜像到 `%LOCALAPPDATA%\AINovelFactoryDev` 再启动，并通过 `NOVEL_DATA_DIR` 继续使用原项目的配置与作品
 - 后端端口固定 `8765`，前端 Vite 固定 `5173`（均在代码中硬编码）
 - Electron 会先等 `/api/health` 通过再开窗；若 30 秒内未就绪会弹中文排查提示
 - 关闭窗口时 Electron 会回收 Python 后端（开发模式还会清理占用 5173 的进程）
@@ -445,13 +459,16 @@ npm run build
 
 ## 10. 常见问题
 
-**Q1. 双击 exe 提示"后端启动失败"**
+**Q1. 双击 exe 完全没反应 / 窗口一闪而过**
 
-按提示依次排查：
+**先检查路径**：程序所在路径是否包含中文或全角字符（例如 `桌面\小说生成助手（新版）`）。Electron 在这种路径下会在初始化阶段崩溃（Windows 事件查看器里是 `0x80000003` / BEX64），且不会弹窗。把整个绿色版目录移动到纯英文路径（如 `C:\AI-Novel-Factory`）后重试；从源码目录可直接双击 `启动绿色版.bat`。
 
-1. 端口 `8765` 是否被其他程序（包括旧的 python.exe）占用：任务管理器结束它，或重启电脑
-2. 程序是否被杀毒软件隔离 / 解压不完整：重新解压，给解压目录加白名单
-3. 是否放在只读目录：换到用户目录或桌面再试
+如果路径是纯英文仍打不开：
+
+1. 打开任务管理器，确认是否有残留的 `ai-novel-factory.exe` / `novel-backend.exe`，结束它们后重试
+2. 端口 `8765` 是否被其他程序（包括旧的 python.exe）占用：结束占用进程或重启电脑
+3. 程序是否被杀毒软件隔离 / 解压不完整：重新解压，给解压目录加白名单
+4. 是否放在只读目录：换到用户目录下的英文路径再试
 
 **Q2. 设置页测试连接失败**
 
@@ -536,9 +553,11 @@ npm run build
 │  ├─ build_backend.py      # PyInstaller 冻结脚本
 │  └─ run_server.py         # 冻结产物入口
 ├─ assets/                  # 应用图标
-├─ package_portable.py      # 绿色版组装 + 压缩
+├─ package_portable.py      # 绿色版组装 + 压缩（目录名纯英文）
 ├─ set_exe_icon.mjs         # 写入 exe PE 图标
 ├─ install.bat / dev.bat / build-portable.bat
+├─ 启动绿色版.bat           # 从中文路径源码目录启动绿色版（自动同步到英文路径）
+├─ dev-ascii.bat            # 从中文路径启动开发模式（自动同步到英文路径）
 ├─ CLAUDE.md                # 开发文档与完整修复记录
 └─ README.md
 ```
@@ -549,7 +568,8 @@ npm run build
 
 | 版本 | 日期 | 主要内容 |
 |---|---|---|
-| **2.2.0** | 2026-10-31 | 深度审计修复：章节计数/续写键位、世界观审阅丢字段、项目库字段层级、适配落盘、章节提示词、配置校验、审阅重开与状态回填、预览页字段；新增 32 项后端自检 |
+| **2.2.1** | 2026-10-31 | 修复中文/全角路径导致 Electron 无法启动：绿色版目录改为纯英文、新增 `启动绿色版.bat` 与 `dev-ascii.bat`、README 补充路径要求 |
+| 2.2.0 | 2026-10-31 | 深度审计修复：章节计数/续写键位、世界观审阅丢字段、项目库字段层级、适配落盘、章节提示词、配置校验、审阅重开与状态回填、预览页字段；新增 32 项后端自检 |
 | 2.1.1 | 2026-09-30 | 应用图标（窗口 + exe PE 资源） |
 | 2.1.0 | 2026-09-30 | 免安装绿色版打包、移除 PyQt6、质量阈值接入评估 prompt |
 | 1.0.x | — | 从 PyQt6 旧版重构为 Electron + React + FastAPI |

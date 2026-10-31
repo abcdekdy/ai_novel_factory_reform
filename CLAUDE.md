@@ -14,6 +14,8 @@ install.bat
 
 # 开发模式（同时启动 Vite 前端 + Electron，Python 后端由 Electron 管理）
 dev.bat
+# 项目路径含中文/全角字符时，Electron 无法启动；改用：
+#   dev-ascii.bat  （镜像到 %LOCALAPPDATA%\AINovelFactoryDev 后运行）
 
 # 或手动分终端启动：
 # 终端 1: cd frontend && npm run dev
@@ -24,11 +26,13 @@ npm run build
 # 等价于三步：
 #   npm run build:frontend  -> frontend/dist/
 #   npm run build:backend   -> backend/dist/novel-backend/（PyInstaller 冻结）
-#   npm run build:portable  -> out/AI小说工厂-win32-x64(.zip)
+#   npm run build:portable  -> out/AI-Novel-Factory-win32-x64(.zip)
 
 # 打包步骤可单独重跑；产物为免安装绿色版，解压后双击
-#   out/AI小说工厂-win32-x64/ai-novel-factory.exe
+#   out/AI-Novel-Factory-win32-x64/ai-novel-factory.exe
 # 即可运行，**无需安装 Python**。
+# ⚠ 产物路径与解压路径必须是纯 ASCII：Electron 在含中文/全角字符的路径下
+#   启动会崩溃（STATUS_BREAKPOINT，表现为双击无反应）。
 ```
 
 **端口约定**：后端 8765、前端 Vite 5173、均硬编码在代码中。
@@ -41,10 +45,11 @@ npm run build
 
 ## 版本与发布
 
-- **当前版本**：`2.2.0`（2026-10-31）
+- **当前版本**：`2.2.1`（2026-10-31）
 - **仓库**：https://github.com/abcdekdy/ai_novel_factory_reform （默认分支 `master`）
 - **版本号需三处同步**：根 `package.json`、`frontend/package.json`、`backend/main.py`（`FastAPI(version=...)` 与 `/api/health`）。lockfile 顶部的根版本仅在必要时同步。
 - **版本历史**：
+  - `2.2.1`：修复中文/全角路径导致 Electron 崩溃；绿色版目录名改纯英文；新增 `启动绿色版.bat` / `dev-ascii.bat`
   - `2.2.0`：深度审计修复（计数/续写/审阅/开销）+ 32 项后端自检 + README 重写
   - `2.1.1`：应用图标
   - `2.1.0`：免安装绿色版、移除 PyQt6、质量阈值接入
@@ -210,8 +215,10 @@ backend/         — FastAPI + Python 核心
 ## Electron 打包（免安装绿色版）
 
 **一条命令**：`npm run build`（或双击 `build-portable.bat`），产物为
-`out/AI小说工厂-win32-x64/` 与同名 zip。解压后双击 `ai-novel-factory.exe` 即可运行，
+`out/AI-Novel-Factory-win32-x64/` 与同名 zip。解压后双击 `ai-novel-factory.exe` 即可运行，
 **终端用户无需安装 Python**。
+
+> **路径必须纯 ASCII**：Electron 在包含中文/全角字符的路径下启动会崩溃（STATUS_BREAKPOINT，双击无反应）。因此绿色版目录名固定为 `AI-Novel-Factory-win32-x64`，且要求用户解压到纯英文目录。源码目录若含中文，用 `启动绿色版.bat`（同步到 `%LOCALAPPDATA%\AINovelFactory\app` 后启动）或 `dev-ascii.bat`（同步项目后跑 dev）。
 
 三步流程与各自职责：
 
@@ -559,6 +566,16 @@ backend/         — FastAPI + Python 核心
 
 **验证**：新增 `backend/selftest.py`（标准库 unittest，32 项），覆盖章节计数两种错配、续写键位/总数/弧线、失败章节跳过、适配落盘与跳过、均分口径、批次记录、失败状态、配置校验、短响应重试、字数统计、审阅状态快照、停止后确认被拒绝等；`python selftest.py` 全部通过。前端 `npx tsc --noEmit` 与 `npm run build` 通过。
 
+### 2026-10-31 路径兼容修复（2.2.1）
+
+53. **中文/全角路径导致 Electron 启动即崩溃（用户无法打开应用）**
+    - 现象：双击绿色版无窗口、无报错；`dev.bat` 同样打不开。任务计划程序运行 exe 的 `Last Result` 为 `-2147483645`（`0x80000003`，STATUS_BREAKPOINT）；事件日志无应用错误。
+    - 排查：`electron.exe --version` 返回 `0x80000003`；`--no-sandbox --version` 可正常输出；最小 Electron 应用在项目路径下 `app.whenReady` 不触发。把同一份 Electron 32/44 二进制与最小应用复制到 `%TEMP%\aitest`（纯 ASCII）后立即正常（ wrote ok.txt），**确认与 Electron 版本无关，是路径问题**。`subst` 映射盘符、目录 junction 都会被解析回中文真实路径，无效。
+    - 根因：Electron/Chromium 在包含中文与全角括号（`小说生成助手（新版）`）的路径下初始化崩溃。
+    - 修复：① 绿色版组装目录名改为纯 ASCII `AI-Novel-Factory-win32-x64`（`package_portable.py`），避免解压后目录自带中文；② 新增 `启动绿色版.bat`：把 `out` 同步到 `%LOCALAPPDATA%\AINovelFactory\app`（纯英文）后启动，保留 `data/`；③ 新增 `dev-ascii.bat`：把项目镜像到 `%LOCALAPPDATA%\AINovelFactoryDev` 后运行 `dev.bat`，并用 `NOVEL_DATA_DIR` 继续使用原项目的配置/作品；④ README/CLAUDE 明确“路径必须纯英文”，解压与开发均按此校验。
+    - 验证：在 `%LOCALAPPDATA%\AINovelFactory\app` 启动新构建，窗口标题“AI 小说工厂”、自带后端 `/api/health` 返回 2.2.1、`config.json` 与 2 个历史项目可见；桌面快捷方式可正常打开。
+    - 文件：`package_portable.py`、`启动绿色版.bat`（新增）、`dev-ascii.bat`（新增）、`build-portable.bat`、`README.md`、`CLAUDE.md`
+
 ## 开发规范
 
 
@@ -600,6 +617,8 @@ backend/         — FastAPI + Python 核心
 | Electron preload | `electron/preload.js`（暴露 electronAPI） |
 | 绿色版组装/压缩 | `package_portable.py` |
 | 一键构建绿色版 | `build-portable.bat` |
+| 绿色版启动器（中文路径可用） | `启动绿色版.bat` |
+| 开发模式启动器（中文路径可用） | `dev-ascii.bat` |
 | FastAPI 入口 | `backend/main.py` |
 | SSE 事件总线 | `backend/api/events.py` |
 | 流水线路由 | `backend/api/pipeline.py` |

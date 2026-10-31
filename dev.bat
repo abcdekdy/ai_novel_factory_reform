@@ -5,6 +5,8 @@ title AI Novel Factory - Dev
 
 rem 切换控制台代码页为 UTF-8，避免 Python/Electron 输出的中文乱码
 chcp 65001 >nul
+rem 某些终端/IDE 会设置 ELECTRON_RUN_AS_NODE=1，导致 Electron 以 Node 模式启动并退出
+set "ELECTRON_RUN_AS_NODE="
 
 set "PROJECT=%~dp0"
 if "%PROJECT:~-1%"=="\" set "PROJECT=%PROJECT:~0,-1%"

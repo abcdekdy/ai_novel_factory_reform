@@ -11,12 +11,15 @@
     npm 安装 Electron 时就已经解压好的完整运行时，确定性且快得多。
 
 产物结构：
-    out/AI小说工厂-win32-x64/
+    out/AI-Novel-Factory-win32-x64/
         ai-novel-factory.exe        <- 由 electron.exe 改名而来
         resources/
             app/                    <- 应用代码（main.js / preload.js / frontend）
             novel-backend/          <- 冻结的 Python 后端
         data/                       <- 首次运行时由后端自动创建
+
+注意：产物目录名与解压路径必须是**纯 ASCII**。Electron 在包含中文或全角
+字符的路径下会在初始化阶段崩溃（STATUS_BREAKPOINT），表现为双击无反应。
 
 用法：python package_portable.py
 前置：先跑 frontend 的 vite build 和 backend/build_backend.py
@@ -32,7 +35,9 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-APP_NAME = "AI小说工厂-win32-x64"
+# 目录名必须是纯 ASCII：Electron 在含中文/全角字符的路径下启动会崩溃
+# （STATUS_BREAKPOINT），用户解压到桌面后目录名若含中文就会打不开。
+APP_NAME = "AI-Novel-Factory-win32-x64"
 EXE_NAME = "ai-novel-factory.exe"
 
 ELECTRON_DIST = ROOT / "node_modules" / "electron" / "dist"
