@@ -45,13 +45,6 @@ SYSTEM_PROMPT = """你是一位专业的内容运营专家，擅长将小说内�
 class PlatformAdapterAgent(BaseAgent):
     """多平台适配Agent"""
 
-    SUPPORTED_PLATFORMS = [
-        "通用网文格式",
-        "微信公众号",
-        "知乎短篇",
-        "Markdown电子书"
-    ]
-
     def __init__(self, llm_client):
         super().__init__("多平台适配", llm_client)
 
@@ -93,7 +86,11 @@ class PlatformAdapterAgent(BaseAgent):
 
             self.set_progress(80)
 
-            adapted = self._parse_json_response(result)
+            # 与其它 Agent 共用同一套 5 层 JSON 解析（此前这里有一份简化版，
+            # 遇到代码块/前后缀文字就退回"原文当内容"，等于静默降级）。
+            adapted = self.parse_json_response(result)
+            if not isinstance(adapted, dict):
+                raise ValueError("适配结果不是 JSON 对象")
             adapted["chapter_index"] = chapter_index
             adapted["platform"] = platform
             adapted["original_title"] = title
@@ -119,41 +116,3 @@ class PlatformAdapterAgent(BaseAgent):
             }
             self.finished_signal.emit(self.name, result)
             return result
-
-    def run_all_platforms(self, input_data: dict) -> dict:
-        """为所有平台生成适配版本"""
-        results = {}
-        for platform in self.SUPPORTED_PLATFORMS:
-            data = {**input_data, "platform": platform}
-            result = self.run(data)
-            results[platform] = result
-        return results
-
-    def _parse_json_response(self, text: str) -> dict:
-        import json
-        import re
-
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-
-        match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
-
-        # 如果JSON解析失败，把原文当作内容返回
-        return {
-            "formatted_content": text,
-            "formatting_notes": ["JSON解析失败，返回原始输出"]
-        }

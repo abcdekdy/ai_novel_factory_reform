@@ -65,8 +65,22 @@ interface AppState {
   pendingContinuationOutline: Outline | null
   setPendingContinuationOutline: (o: Outline | null) => void
 
+  // 审阅对话框是否被用户暂时收起（收起后可从横幅/工作台重新打开）
+  reviewDismissed: ReviewDismissed
+  dismissReview: (type: ReviewKind) => void
+  showReview: (type: ReviewKind) => void
+
   // 重置
   resetPipelineState: () => void
+}
+
+export type ReviewKind = 'world' | 'outline' | 'continuation'
+export type ReviewDismissed = Record<ReviewKind, boolean>
+
+const NO_REVIEW_DISMISSED: ReviewDismissed = {
+  world: false,
+  outline: false,
+  continuation: false,
 }
 
 const DEFAULT_AGENTS: Record<string, AgentCardState> = {
@@ -118,6 +132,7 @@ export const useStore = create<AppState>((set, get) => ({
     pendingWorldView: null,
     pendingOutline: null,
     pendingContinuationOutline: null,
+    reviewDismissed: { ...NO_REVIEW_DISMISSED },
     error: null,
     pipelineError: null,
   }),
@@ -152,4 +167,12 @@ export const useStore = create<AppState>((set, get) => ({
 
   pendingContinuationOutline: null,
   setPendingContinuationOutline: (o) => set({ pendingContinuationOutline: o }),
+
+  reviewDismissed: { ...NO_REVIEW_DISMISSED },
+  dismissReview: (type) => set((state) => ({
+    reviewDismissed: { ...state.reviewDismissed, [type]: true },
+  })),
+  showReview: (type) => set((state) => ({
+    reviewDismissed: { ...state.reviewDismissed, [type]: false },
+  })),
 }))

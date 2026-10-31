@@ -1,80 +1,76 @@
 /**
- * 世界观审阅对话框 — 全屏 Modal 覆盖层，展示并编辑世界观各字段
+ * 世界观审阅对话框 — 展示并编辑世界观，确认后继续生成详细大纲
+ *
+ * 关键约束：确认时必须在**原始对象上合并**，只覆盖用户真正编辑过的字段。
+ * 历史实现是"按表单重建对象"，把没做输入框的 era/location/factions/history
+ * 写成空、把每个角色的 ability 写成空——用户点一次确认，世界观就被削掉一半。
  */
-
 import { useEffect, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { X, BookOpen, Users, Wand2, ListOrdered, Save, RefreshCw } from 'lucide-react'
+import { motion } from 'framer-motion'
+import { X, BookOpen, Users, Wand2, ListOrdered, Save, RefreshCw, Landmark } from 'lucide-react'
 import { api } from '../api/client'
-import type { WorldView, Character, OutlineChapter } from '../types'
+import type { Character, OutlineChapter, WorldView } from '../types'
 
 interface Props {
   worldView: WorldView
+  /** 收起对话框（内容保留，可从横幅重新打开） */
   onClose: () => void
-}
-
-const overlayVariants = {
-  hidden: { opacity: 0 },
-  visible: { opacity: 1 },
+  /** 已确认并提交，清空待审阅内容 */
+  onConfirmed: () => void
 }
 
 const cardVariants = {
-  hidden: { opacity: 0, scale: 0.92, y: 20 },
-  visible: { opacity: 1, scale: 1, y: 0, transition: { type: 'spring', damping: 25, stiffness: 300 } },
+  hidden: { opacity: 0, scale: 0.94, y: 16 },
+  visible: { opacity: 1, scale: 1, y: 0, transition: { type: 'spring', damping: 26, stiffness: 320 } },
 }
 
-export default function WorldViewReviewDialog({ worldView, onClose }: Props) {
-  // 从 LLM 输出提取字段（兼容多种字段名）
-  const extractSetting = (): string => {
-    if (worldView.setting) return worldView.setting
-    const summary = (worldView as Record<string, unknown>).summary
-    if (typeof summary === 'string') return summary
-    return ''
-  }
-  const extractMagicSystem = (): string => {
-    if (worldView.magic_system) return worldView.magic_system
-    const wv = (worldView as Record<string, unknown>).world_view
-    if (wv && typeof wv === 'object') {
-      const rules = (wv as Record<string, unknown>).rules
-      if (typeof rules === 'string') return rules
-    }
-    return ''
-  }
-  const extractCharacters = (): Character[] => {
-    const chars = worldView.characters ?? []
-    return chars.map((c) => {
-      const raw = c as Record<string, unknown>
-      const desc = c.description ?? raw.desc ?? ''
-      return {
-        name: c.name ?? '',
-        role: c.role ?? '',
-        description: typeof desc === 'string' ? desc : '',
-      }
-    })
-  }
-  const extractChapterOutline = (): OutlineChapter[] => {
-    const outline = worldView.chapter_outline ?? []
-    return outline.map((ch) => {
-      const raw = ch as Record<string, unknown>
-      const detail = ch.plot_detail ?? raw.summary ?? ''
-      return {
-        chapter_index: ch.chapter_index,
-        title: ch.title ?? '',
-        plot_detail: typeof detail === 'string' ? detail : '',
-      }
-    })
-  }
+const INPUT_CLASS =
+  'w-full rounded-apple glass-inset px-3 py-2 text-sm text-apple-text ' +
+  'focus:outline-none focus:ring-2 focus:ring-apple-blue/30'
+const LABEL_CLASS = 'block text-sm font-medium text-apple-text-secondary mb-1.5'
 
-  const [title, setTitle] = useState(worldView.title ?? '')
-  const [genre, setGenre] = useState(worldView.genre ?? '')
-  const [setting, setSetting] = useState(extractSetting())
-  const [characters, setCharacters] = useState<Character[]>(extractCharacters())
-  const [magicSystem, setMagicSystem] = useState(extractMagicSystem())
-  const [chapterOutline, setChapterOutline] = useState<OutlineChapter[]>(extractChapterOutline())
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+export default function WorldViewReviewDialog({ worldView, onClose, onConfirmed }: Props) {
+  const detail = worldView.world_view ?? {}
+  const framework = worldView.story_framework ?? {}
+
+  const [title, setTitle] = useState(asString(worldView.title))
+  const [genre, setGenre] = useState(asString(worldView.genre))
+  const [summary, setSummary] = useState(
+    asString(worldView.summary) || asString(worldView.setting))
+  const [era, setEra] = useState(asString(detail.era))
+  const [location, setLocation] = useState(asString(detail.location))
+  const [rules, setRules] = useState(
+    asString(detail.rules) || asString(worldView.magic_system))
+  const [factions, setFactions] = useState(
+    Array.isArray(detail.factions) ? detail.factions.join('、') : '')
+  const [history, setHistory] = useState(asString(detail.history))
+  const [premise, setPremise] = useState(asString(framework.premise))
+  const [conflict, setConflict] = useState(asString(framework.conflict))
+  const [climax, setClimax] = useState(asString(framework.climax))
+  const [endingType, setEndingType] = useState(asString(framework.ending_type))
+
+  const [characters, setCharacters] = useState<Character[]>(
+    (worldView.characters ?? []).map((c) => ({
+      ...c,
+      name: asString(c.name),
+      role: asString(c.role),
+      desc: asString(c.desc) || asString(c.description),
+      ability: asString(c.ability),
+    })))
+  const [chapterOutline, setChapterOutline] = useState<OutlineChapter[]>(
+    (worldView.chapter_outline ?? []).map((ch) => ({
+      ...ch,
+      title: asString(ch.title),
+      summary: asString(ch.summary) || asString(ch.plot_detail),
+    })))
+
   const [saving, setSaving] = useState(false)
   const [regenerating, setRegenerating] = useState(false)
 
-  // ESC 关闭
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -83,21 +79,20 @@ export default function WorldViewReviewDialog({ worldView, onClose }: Props) {
     return () => window.removeEventListener('keydown', handler)
   }, [onClose])
 
-  const updateCharacter = (idx: number, field: keyof Character, value: string) => {
-    setCharacters(prev => prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c)))
+  const updateCharacter = (idx: number, field: 'name' | 'role' | 'desc' | 'ability', value: string) => {
+    setCharacters((prev) => prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c)))
   }
 
-  const updateOutlineChapter = (idx: number, field: keyof OutlineChapter, value: string) => {
-    setChapterOutline(prev => prev.map((ch, i) => (i === idx ? { ...ch, [field]: value } : ch)))
+  const updateOutlineChapter = (idx: number, field: 'title' | 'summary', value: string) => {
+    setChapterOutline((prev) => prev.map((ch, i) => (i === idx ? { ...ch, [field]: value } : ch)))
   }
 
   const handleRegenerate = async () => {
     setRegenerating(true)
     try {
       await api.retryWorldView()
-      onClose()
+      onConfirmed()
     } catch (err) {
-      console.error('重新生成世界观失败:', err)
       alert(err instanceof Error ? err.message : '重新生成失败')
       setRegenerating(false)
     }
@@ -106,40 +101,45 @@ export default function WorldViewReviewDialog({ worldView, onClose }: Props) {
   const handleConfirm = async () => {
     setSaving(true)
     try {
-      // 把编辑后的扁平字段映射回后端 OutlineBuilderAgent 需要的嵌套结构
-      const reviewedWorldView: Record<string, unknown> = {
+      // 以原始对象为基底合并，保住所有没被编辑的字段（含未知扩展字段）
+      const reviewed: Record<string, unknown> = {
+        ...worldView,
         title,
         genre,
-        summary: setting,  // setting 编辑后写回 summary
+        summary,
         world_view: {
-          rules: magicSystem,  // 力量体系写回 world_view.rules
-          era: '',
-          location: '',
-          factions: [],
-          history: '',
+          ...detail,
+          era,
+          location,
+          rules,
+          factions: factions.split(/[、,，]/).map((s) => s.trim()).filter(Boolean),
+          history,
+        },
+        story_framework: {
+          ...framework,
+          premise,
+          conflict,
+          climax,
+          ending_type: endingType,
         },
         characters: characters.map((c) => ({
+          ...c,
           name: c.name,
           role: c.role,
-          desc: c.description,  // description → desc
-          ability: '',
+          desc: c.desc,
+          ability: c.ability,
         })),
-        chapter_outline: chapterOutline.map((ch) => ({
-          chapter_index: ch.chapter_index,
-          chapter: ch.chapter_index,
+        chapter_outline: chapterOutline.map((ch, idx) => ({
+          ...ch,
+          chapter_index: ch.chapter_index ?? idx + 1,
+          chapter: ch.chapter ?? ch.chapter_index ?? idx + 1,
           title: ch.title,
-          summary: ch.plot_detail,  // plot_detail → summary
+          summary: ch.summary,
         })),
       }
-      // 保留原始数据中未被编辑的字段（如 story_framework）
-      const original = worldView as Record<string, unknown>
-      if (original.story_framework) {
-        reviewedWorldView.story_framework = original.story_framework
-      }
-      await api.confirmWorldView({ world_view: reviewedWorldView })
-      onClose()
+      await api.confirmWorldView({ world_view: reviewed })
+      onConfirmed()
     } catch (err) {
-      console.error('确认世界观失败:', err)
       alert(err instanceof Error ? err.message : '确认失败')
     } finally {
       setSaving(false)
@@ -147,182 +147,193 @@ export default function WorldViewReviewDialog({ worldView, onClose }: Props) {
   }
 
   return (
-    <AnimatePresence>
+    <motion.div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      onClick={onClose}
+    >
       <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
-        variants={overlayVariants}
+        className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-apple-xl glass-heavy shadow-apple-lg"
+        variants={cardVariants}
         initial="hidden"
         animate="visible"
-        exit="hidden"
-        onClick={onClose}
+        onClick={(e) => e.stopPropagation()}
       >
-        <motion.div
-          className="relative w-full max-w-2xl max-h-[80vh] overflow-y-auto rounded-2xl bg-white shadow-2xl"
-          variants={cardVariants}
-          onClick={e => e.stopPropagation()}
-        >
-          {/* 头部 */}
-          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 bg-white/90 px-6 py-4 backdrop-blur supports-[backdrop-filter]:bg-white/80">
-            <div className="flex items-center gap-2">
-              <BookOpen className="h-5 w-5 text-blue-500" />
-              <h2 className="text-lg font-semibold text-gray-900">审阅世界观</h2>
+        {/* 头部 */}
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-black/5 bg-white/85 px-6 py-4 backdrop-blur">
+          <div className="flex items-center gap-2">
+            <BookOpen className="h-5 w-5 text-apple-blue" />
+            <h2 className="text-lg font-semibold text-apple-text">审阅世界观</h2>
+            <span className="text-xs text-apple-text-muted">确认后开始生成详细大纲</span>
+          </div>
+          <button
+            onClick={onClose}
+            title="暂时收起，可从顶部横幅重新打开"
+            className="rounded-full p-1.5 text-apple-text-muted transition-colors hover:bg-black/5 hover:text-apple-text"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* 内容 */}
+        <div className="space-y-6 px-6 py-5">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={LABEL_CLASS}>作品标题</label>
+              <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} className={INPUT_CLASS} />
             </div>
-            <button
-              onClick={onClose}
-              className="rounded-full p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
-            >
-              <X className="h-5 w-5" />
-            </button>
-          </div>
-
-          {/* 内容 */}
-          <div className="space-y-6 px-6 py-5">
-            {/* 标题 */}
-            <FieldGroup label="作品标题" icon={<BookOpen className="h-4 w-4" />}>
-              <input
-                type="text"
-                value={title}
-                onChange={e => setTitle(e.target.value)}
-                className="w-full rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 outline-none transition-colors focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/20"
-              />
-            </FieldGroup>
-
-            {/* 题材 */}
-            <FieldGroup label="题材" icon={<Wand2 className="h-4 w-4" />}>
-              <input
-                type="text"
-                value={genre}
-                onChange={e => setGenre(e.target.value)}
-                className="w-full rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 outline-none transition-colors focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/20"
-              />
-            </FieldGroup>
-
-            {/* 设定 */}
-            <FieldGroup label="世界观设定" icon={<Wand2 className="h-4 w-4" />}>
-              <textarea
-                value={setting}
-                onChange={e => setSetting(e.target.value)}
-                rows={4}
-                className="w-full resize-none rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 outline-none transition-colors focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/20"
-              />
-            </FieldGroup>
-
-            {/* 角色 */}
-            <FieldGroup label="角色" icon={<Users className="h-4 w-4" />}>
-              <div className="space-y-3">
-                {characters.map((char, idx) => (
-                  <div key={idx} className="rounded-xl border border-gray-100 bg-gray-50/30 p-3">
-                    <div className="grid grid-cols-2 gap-2">
-                      <input
-                        type="text"
-                        value={char.name ?? ''}
-                        onChange={e => updateCharacter(idx, 'name', e.target.value)}
-                        placeholder="角色名"
-                        className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                      />
-                      <input
-                        type="text"
-                        value={char.role ?? ''}
-                        onChange={e => updateCharacter(idx, 'role', e.target.value)}
-                        placeholder="身份/角色"
-                        className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                      />
-                    </div>
-                    <textarea
-                      value={char.description ?? ''}
-                      onChange={e => updateCharacter(idx, 'description', e.target.value)}
-                      placeholder="角色描述"
-                      rows={2}
-                      className="mt-2 w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                  </div>
-                ))}
-                {characters.length === 0 && (
-                  <p className="text-sm text-gray-400">暂无角色</p>
-                )}
-              </div>
-            </FieldGroup>
-
-            {/* 魔法/力量体系 */}
-            <FieldGroup label="力量体系" icon={<Wand2 className="h-4 w-4" />}>
-              <textarea
-                value={magicSystem}
-                onChange={e => setMagicSystem(e.target.value)}
-                rows={3}
-                className="w-full resize-none rounded-lg border border-gray-200 bg-gray-50/50 px-3 py-2 text-sm text-gray-900 outline-none transition-colors focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/20"
-              />
-            </FieldGroup>
-
-            {/* 章节大纲 */}
-            <FieldGroup label="章节大纲" icon={<ListOrdered className="h-4 w-4" />}>
-              <div className="space-y-3">
-                {chapterOutline.map((ch, idx) => (
-                  <div key={idx} className="rounded-xl border border-gray-100 bg-gray-50/30 p-3">
-                    <input
-                      type="text"
-                      value={ch.title ?? ''}
-                      onChange={e => updateOutlineChapter(idx, 'title', e.target.value)}
-                      placeholder="章节标题"
-                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                    <textarea
-                      value={ch.plot_detail ?? ''}
-                      onChange={e => updateOutlineChapter(idx, 'plot_detail', e.target.value)}
-                      placeholder="情节详情"
-                      rows={2}
-                      className="mt-2 w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                  </div>
-                ))}
-                {chapterOutline.length === 0 && (
-                  <p className="text-sm text-gray-400">暂无章节大纲</p>
-                )}
-              </div>
-            </FieldGroup>
-          </div>
-
-          {/* 底部按钮 */}
-          <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-gray-200 bg-white/90 px-6 py-4 backdrop-blur supports-[backdrop-filter]:bg-white/80">
-            <button
-              onClick={onClose}
-              className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 active:scale-[0.98]"
-            >
-              取消
-            </button>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleRegenerate}
-                disabled={regenerating || saving}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm font-medium text-amber-700 transition-colors hover:bg-amber-100 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <RefreshCw className={`h-4 w-4 ${regenerating ? 'animate-spin' : ''}`} />
-                {regenerating ? '生成中…' : '重新生成'}
-              </button>
-              <button
-                onClick={handleConfirm}
-                disabled={saving || regenerating}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-500 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-blue-600 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <Save className="h-4 w-4" />
-                {saving ? '保存中…' : '确认并继续'}
-              </button>
+            <div>
+              <label className={LABEL_CLASS}>题材</label>
+              <input type="text" value={genre} onChange={(e) => setGenre(e.target.value)} className={INPUT_CLASS} />
             </div>
           </div>
-        </motion.div>
+
+          <div>
+            <label className={LABEL_CLASS}>世界观简介</label>
+            <textarea value={summary} onChange={(e) => setSummary(e.target.value)} rows={4}
+              className={`${INPUT_CLASS} resize-none leading-relaxed`} />
+          </div>
+
+          <div className="rounded-apple border border-black/5 bg-black/[0.02] p-4 space-y-4">
+            <div className="flex items-center gap-2 text-sm font-medium text-apple-text">
+              <Landmark size={15} className="text-apple-blue" />
+              世界设定
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className={LABEL_CLASS}>时代背景</label>
+                <input type="text" value={era} onChange={(e) => setEra(e.target.value)} className={INPUT_CLASS} />
+              </div>
+              <div>
+                <label className={LABEL_CLASS}>地理设定</label>
+                <input type="text" value={location} onChange={(e) => setLocation(e.target.value)} className={INPUT_CLASS} />
+              </div>
+            </div>
+            <div>
+              <label className={LABEL_CLASS}>世界规则 / 力量体系</label>
+              <textarea value={rules} onChange={(e) => setRules(e.target.value)} rows={3}
+                className={`${INPUT_CLASS} resize-none leading-relaxed`} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className={LABEL_CLASS}>主要势力（用、分隔）</label>
+                <input type="text" value={factions} onChange={(e) => setFactions(e.target.value)} className={INPUT_CLASS} />
+              </div>
+              <div>
+                <label className={LABEL_CLASS}>历史背景</label>
+                <input type="text" value={history} onChange={(e) => setHistory(e.target.value)} className={INPUT_CLASS} />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-apple border border-black/5 bg-black/[0.02] p-4 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-apple-text">
+              <Wand2 size={15} className="text-apple-blue" />
+              故事框架
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className={LABEL_CLASS}>故事开端</label>
+                <input type="text" value={premise} onChange={(e) => setPremise(e.target.value)} className={INPUT_CLASS} />
+              </div>
+              <div>
+                <label className={LABEL_CLASS}>核心冲突</label>
+                <input type="text" value={conflict} onChange={(e) => setConflict(e.target.value)} className={INPUT_CLASS} />
+              </div>
+              <div>
+                <label className={LABEL_CLASS}>高潮设计</label>
+                <input type="text" value={climax} onChange={(e) => setClimax(e.target.value)} className={INPUT_CLASS} />
+              </div>
+              <div>
+                <label className={LABEL_CLASS}>结局方向</label>
+                <input type="text" value={endingType} onChange={(e) => setEndingType(e.target.value)} className={INPUT_CLASS} />
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center gap-1.5 text-sm font-medium text-apple-text">
+              <Users size={15} className="text-apple-blue" />
+              角色 <span className="text-xs font-normal text-apple-text-muted">{characters.length} 个</span>
+            </div>
+            <div className="space-y-3">
+              {characters.map((char, idx) => (
+                <div key={idx} className="rounded-apple border border-black/5 bg-black/[0.02] p-3 space-y-2">
+                  <div className="grid grid-cols-3 gap-2">
+                    <input type="text" value={char.name ?? ''} placeholder="角色名"
+                      onChange={(e) => updateCharacter(idx, 'name', e.target.value)} className={INPUT_CLASS} />
+                    <input type="text" value={char.role ?? ''} placeholder="身份"
+                      onChange={(e) => updateCharacter(idx, 'role', e.target.value)} className={INPUT_CLASS} />
+                    <input type="text" value={char.ability ?? ''} placeholder="核心能力"
+                      onChange={(e) => updateCharacter(idx, 'ability', e.target.value)} className={INPUT_CLASS} />
+                  </div>
+                  <textarea value={char.desc ?? ''} placeholder="角色描述" rows={2}
+                    onChange={(e) => updateCharacter(idx, 'desc', e.target.value)}
+                    className={`${INPUT_CLASS} resize-none`} />
+                </div>
+              ))}
+              {characters.length === 0 && (
+                <p className="text-sm text-apple-text-muted">暂无角色</p>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center gap-1.5 text-sm font-medium text-apple-text">
+              <ListOrdered size={15} className="text-apple-blue" />
+              章节大纲 <span className="text-xs font-normal text-apple-text-muted">{chapterOutline.length} 章</span>
+            </div>
+            <div className="space-y-3">
+              {chapterOutline.map((ch, idx) => (
+                <div key={idx} className="rounded-apple border border-black/5 bg-black/[0.02] p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-apple-blue-dim px-1.5 text-xs font-medium text-apple-blue">
+                      {ch.chapter_index ?? idx + 1}
+                    </span>
+                    <input type="text" value={ch.title ?? ''} placeholder="章节标题"
+                      onChange={(e) => updateOutlineChapter(idx, 'title', e.target.value)} className={INPUT_CLASS} />
+                  </div>
+                  <textarea value={ch.summary ?? ''} placeholder="情节概要" rows={2}
+                    onChange={(e) => updateOutlineChapter(idx, 'summary', e.target.value)}
+                    className={`${INPUT_CLASS} resize-none`} />
+                </div>
+              ))}
+              {chapterOutline.length === 0 && (
+                <p className="text-sm text-apple-text-muted">暂无章节大纲</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* 底部 */}
+        <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-black/5 bg-white/85 px-6 py-4 backdrop-blur">
+          <button
+            onClick={onClose}
+            className="rounded-apple-sm border border-black/10 bg-white/70 px-4 py-2 text-sm font-medium text-apple-text-secondary transition-colors hover:bg-white"
+          >
+            稍后审阅
+          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleRegenerate}
+              disabled={regenerating || saving}
+              className="inline-flex items-center gap-1.5 rounded-apple-sm border border-apple-warning/40 bg-apple-warning/10 px-4 py-2 text-sm font-medium text-apple-warning transition-colors hover:bg-apple-warning/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <RefreshCw className={`h-4 w-4 ${regenerating ? 'animate-spin' : ''}`} />
+              {regenerating ? '生成中…' : '重新生成'}
+            </button>
+            <button
+              onClick={handleConfirm}
+              disabled={saving || regenerating}
+              className="inline-flex items-center gap-1.5 rounded-apple-sm bg-apple-blue px-4 py-2 text-sm font-medium text-white shadow-apple transition-colors hover:bg-apple-blue-hover disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Save className="h-4 w-4" />
+              {saving ? '保存中…' : '确认并继续'}
+            </button>
+          </div>
+        </div>
       </motion.div>
-    </AnimatePresence>
-  )
-}
-
-/** 带图标的字段分组标签 */
-function FieldGroup({ label, icon, children }: { label: string; icon: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="mb-2 flex items-center gap-1.5 text-sm font-medium text-gray-700">
-        <span className="text-gray-400">{icon}</span>
-        {label}
-      </div>
-      {children}
-    </div>
+    </motion.div>
   )
 }

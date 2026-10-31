@@ -2,7 +2,7 @@
  * Electron 主进程
  * 启动 Python 后端子进程，创建应用窗口
  */
-const { app, BrowserWindow, Menu, Tray, ipcMain, shell, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const http = require('http')
@@ -14,7 +14,6 @@ const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`
 
 let mainWindow = null
 let pythonProcess = null
-let tray = null
 let backendStartError = null
 
 // ===== Python 后端管理 =====
@@ -273,24 +272,6 @@ function createWindow() {
       killProcessOnPort(5173)
     }
   })
-}
-
-// ===== 托盘 =====
-
-function createTray() {
-  if (tray) return
-  try {
-    tray = new Tray(path.join(__dirname, '..', 'assets', 'tray-icon.png'))
-    const contextMenu = Menu.buildFromTemplate([
-      { label: '显示主窗口', click: () => mainWindow && mainWindow.show() },
-      { type: 'separator' },
-      { label: '退出', click: () => app.quit() },
-    ])
-    tray.setToolTip('AI 小说工厂')
-    tray.setContextMenu(contextMenu)
-  } catch (e) {
-    // 托盘图标可选，失败不影响
-  }
 }
 
 // ===== 应用生命周期 =====

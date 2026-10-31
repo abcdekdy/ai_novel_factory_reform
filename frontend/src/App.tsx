@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useStore } from './stores/useStore'
 import { useSSE } from './stores/useSSE'
@@ -16,25 +16,22 @@ import { AlertCircle, X, Bell, BookOpen, PenTool } from 'lucide-react'
 
 const TAB_COMPONENTS = [CreateTab, WorkspaceTab, PreviewTab, ProjectsTab, SettingsTab]
 
-const PAGE_VARIANTS = {
-  initial: { opacity: 0, y: 12 },
-  animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: -8 },
-}
-
 export default function App() {
   const activeTab = useStore((s) => s.activeTab)
   const pendingWorldView = useStore((s) => s.pendingWorldView)
   const pendingOutline = useStore((s) => s.pendingOutline)
   const pendingContinuationOutline = useStore((s) => s.pendingContinuationOutline)
+  const reviewDismissed = useStore((s) => s.reviewDismissed)
   const setPendingWorldView = useStore((s) => s.setPendingWorldView)
   const setPendingOutline = useStore((s) => s.setPendingOutline)
   const setPendingContinuationOutline = useStore((s) => s.setPendingContinuationOutline)
+  const dismissReview = useStore((s) => s.dismissReview)
+  const showReview = useStore((s) => s.showReview)
   const error = useStore((s) => s.error)
   const setError = useStore((s) => s.setError)
   const [launched, setLaunched] = useState(false)
 
-  // 启动 SSE 连接
+  // 启动 SSE 连接（连接建立后会回填一次流水线状态）
   useSSE()
 
   if (!launched) {
@@ -76,18 +73,15 @@ export default function App() {
         </motion.div>
       )}
 
-      {/* 审阅通知横幅 - 当有审阅任务时显示 */}
+      {/* 审阅提醒：只在用户把对话框收起后出现，点击可重新打开 */}
       <AnimatePresence>
-        {pendingWorldView && (
-          <motion.div
+        {pendingWorldView && reviewDismissed.world && (
+          <motion.button
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] flex items-center gap-3 px-5 py-3 rounded-apple-lg bg-apple-blue text-white shadow-apple-lg max-w-md cursor-pointer"
-            onClick={() => {
-              // 点击通知时切换到工作台 tab，用户可以看到 Agent 状态
-              useStore.getState().setActiveTab(1)
-            }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] flex items-center gap-3 px-5 py-3 rounded-apple-lg bg-apple-blue text-white shadow-apple-lg max-w-md"
+            onClick={() => showReview('world')}
           >
             <motion.div
               animate={{ scale: [1, 1.2, 1] }}
@@ -95,22 +89,20 @@ export default function App() {
             >
               <Bell size={18} />
             </motion.div>
-            <span className="text-sm flex-1">世界观已生成，请审阅确认后继续</span>
+            <span className="text-sm flex-1">世界观待审阅，点击继续</span>
             <BookOpen size={16} />
-          </motion.div>
+          </motion.button>
         )}
       </AnimatePresence>
 
       <AnimatePresence>
-        {pendingOutline && !pendingWorldView && (
-          <motion.div
+        {pendingOutline && reviewDismissed.outline && (
+          <motion.button
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] flex items-center gap-3 px-5 py-3 rounded-apple-lg bg-apple-success text-white shadow-apple-lg max-w-md cursor-pointer"
-            onClick={() => {
-              useStore.getState().setActiveTab(1)
-            }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] flex items-center gap-3 px-5 py-3 rounded-apple-lg bg-apple-success text-white shadow-apple-lg max-w-md"
+            onClick={() => showReview('outline')}
           >
             <motion.div
               animate={{ scale: [1, 1.2, 1] }}
@@ -118,22 +110,20 @@ export default function App() {
             >
               <Bell size={18} />
             </motion.div>
-            <span className="text-sm flex-1">详细大纲已生成，请审阅确认后继续</span>
+            <span className="text-sm flex-1">详细大纲待审阅，点击继续</span>
             <PenTool size={16} />
-          </motion.div>
+          </motion.button>
         )}
       </AnimatePresence>
 
       <AnimatePresence>
-        {pendingContinuationOutline && !pendingWorldView && !pendingOutline && (
-          <motion.div
+        {pendingContinuationOutline && reviewDismissed.continuation && (
+          <motion.button
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] flex items-center gap-3 px-5 py-3 rounded-apple-lg bg-apple-success text-white shadow-apple-lg max-w-md cursor-pointer"
-            onClick={() => {
-              useStore.getState().setActiveTab(1)
-            }}
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-[90] flex items-center gap-3 px-5 py-3 rounded-apple-lg bg-apple-success text-white shadow-apple-lg max-w-md"
+            onClick={() => showReview('continuation')}
           >
             <motion.div
               animate={{ scale: [1, 1.2, 1] }}
@@ -141,29 +131,32 @@ export default function App() {
             >
               <Bell size={18} />
             </motion.div>
-            <span className="text-sm flex-1">续写大纲已生成，请审阅确认后继续</span>
+            <span className="text-sm flex-1">续写大纲待审阅，点击继续</span>
             <PenTool size={16} />
-          </motion.div>
+          </motion.button>
         )}
       </AnimatePresence>
 
-      {/* 审阅对话框 */}
-      {pendingWorldView && (
+      {/* 审阅对话框：关闭 = 暂时收起，可从横幅/工作台重新打开 */}
+      {pendingWorldView && !reviewDismissed.world && (
         <WorldViewReviewDialog
           worldView={pendingWorldView}
-          onClose={() => setPendingWorldView(null)}
+          onClose={() => dismissReview('world')}
+          onConfirmed={() => setPendingWorldView(null)}
         />
       )}
-      {pendingOutline && (
+      {pendingOutline && !reviewDismissed.outline && (
         <OutlineReviewDialog
           outline={pendingOutline}
-          onClose={() => setPendingOutline(null)}
+          onClose={() => dismissReview('outline')}
+          onConfirmed={() => setPendingOutline(null)}
         />
       )}
-      {pendingContinuationOutline && (
+      {pendingContinuationOutline && !reviewDismissed.continuation && (
         <ContinuationReviewDialog
           outline={pendingContinuationOutline}
-          onClose={() => setPendingContinuationOutline(null)}
+          onClose={() => dismissReview('continuation')}
+          onConfirmed={() => setPendingContinuationOutline(null)}
         />
       )}
     </div>

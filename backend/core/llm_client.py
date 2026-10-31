@@ -74,12 +74,18 @@ class LLMClient:
         user_prompt: str,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        min_length: int = 50,
     ) -> str:
         """Send one non-streaming Messages API request with bounded retries.
 
-        Retries on exceptions AND on empty/short responses (raising the token
-        budget each retry, since a truncated response is often caused by the
-        max_tokens ceiling).
+        Retries on exceptions AND on responses shorter than ``min_length``
+        (raising the token budget each retry, since a truncated response is
+        often caused by the max_tokens ceiling).
+
+        ``min_length`` exists because the "short response" heuristic is only
+        meaningful for long-form generation.  A connection test legitimately
+        answers with a few characters; treating that as truncated used to
+        triple the number of API calls per test.
         """
         token_limit = max_tokens or 4096
         last_error: Exception | None = None
@@ -89,7 +95,7 @@ class LLMClient:
                 result = self._create_message(
                     system_prompt, user_prompt, temperature, token_limit
                 )
-                if result and len(result.strip()) >= 50:
+                if result and (min_length <= 0 or len(result.strip()) >= min_length):
                     return result
                 # 空/极短响应：提高预算重试（常因 max_tokens 触顶截断所致）
                 if attempt < self.max_retries - 1:
@@ -247,7 +253,12 @@ class LLMClient:
                 system_prompt="You are a helpful assistant.",
                 user_prompt="回复“连接成功”三个字，不要多答。",
                 max_tokens=50,
+                # 连接测试的回复本来就很短，不能套用"短响应=被截断"的启发式，
+                # 否则一次测试要发 3 次请求。
+                min_length=0,
             )
+            if not (response or "").strip():
+                return {"ok": False, "message": "连接成功但模型返回为空，请检查模型名称与网关"}
             return {"ok": True, "message": f"连接正常：{response.strip()}"}
         except Exception as exc:
             message = str(exc)
@@ -263,16 +274,3 @@ class LLMClient:
             else:
                 user_message = f"连接异常：{message[:120]}"
             return {"ok": False, "message": user_message}
-
-    def set_connection(self, base_url: str | None = None, model: str | None = None):
-        """Update connection metadata for callers that keep an existing client."""
-        if base_url:
-            self.base_url = base_url.strip().rstrip("/")
-        if model:
-            self.model = model.strip()
-
-
-def test_connection(api_key: str, base_url: str, model: str) -> tuple[bool, str]:
-    """Compatibility helper for code that tests a connection outside the API."""
-    result = LLMClient(api_key=api_key, base_url=base_url, model=model).test_connection()
-    return result["ok"], result["message"]

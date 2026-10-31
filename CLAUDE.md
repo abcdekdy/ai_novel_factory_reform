@@ -33,16 +33,34 @@ npm run build
 
 **端口约定**：后端 8765、前端 Vite 5173、均硬编码在代码中。
 
-**注意**：无测试框架（无 pytest/vitest/jest），无 Python 格式化/lint 工具（无 ruff/black/pre-commit）。**PyQt6 已完全移除**（后端原以 Qt 当信号总线，现用 `core/signals.py`），后端依赖见 `backend/requirements.txt`。
+**注意**：无 pytest/vitest/jest 等测试框架；后端有一份标准库 `unittest` 自检 `backend/selftest.py`（`cd backend && python selftest.py`），覆盖流水线计数、续写键位、适配落盘、配置校验等易复发逻辑。仍无 Python 格式化/lint 工具（无 ruff/black/pre-commit）。**PyQt6 已完全移除**（后端原以 Qt 当信号总线，现用 `core/signals.py`），后端依赖见 `backend/requirements.txt`。
 
 国内网络需配置 Electron 镜像（已写入 `package.json` 的 `config` 字段，指向 npmmirror；`.npmrc` 不再放镜像键，避免 npm 警告且 @electron/get 不识别）。
 
 **重要**：修改后端代码后必须重启才能生效。如端口 8765 被占用，需用任务管理器结束 python.exe 进程。
 
+## 版本与发布
+
+- **当前版本**：`2.2.0`（2026-10-31）
+- **仓库**：https://github.com/abcdekdy/ai_novel_factory_reform （默认分支 `master`）
+- **版本号需三处同步**：根 `package.json`、`frontend/package.json`、`backend/main.py`（`FastAPI(version=...)` 与 `/api/health`）。lockfile 顶部的根版本仅在必要时同步。
+- **版本历史**：
+  - `2.2.0`：深度审计修复（计数/续写/审阅/开销）+ 32 项后端自检 + README 重写
+  - `2.1.1`：应用图标
+  - `2.1.0`：免安装绿色版、移除 PyQt6、质量阈值接入
+  - `1.0.x`：Electron + React + FastAPI 重构首版
+- **发布流程**：
+  1. 更新三处版本号
+  2. `cd backend && python selftest.py`；`cd frontend && npx tsc --noEmit && npm run build`
+  3. `git add -A && git commit`
+  4. `git tag vX.Y.Z && git push origin master --tags`
+  5. 需要分发绿色版时另跑 `npm run build`（产物不入库）
+- **文档分工**：`README.md` 面向使用者（安装/使用/部署/FAQ）；本文件面向开发者（架构、机制、字段、完整修复记录）。
+
 ## 架构
 
 ```
-electron/        — Electron 主进程（启动 Python 子进程、窗口管理、系统托盘）
+electron/        — Electron 主进程（启动 Python 子进程、窗口管理、后端健康检查）
 frontend/        — React + TypeScript + Vite + Tailwind + Framer Motion
   src/
     pages/       — 5 个 Tab 页面（Create/Workspace/Preview/Projects/Settings）
@@ -93,10 +111,10 @@ backend/         — FastAPI + Python 核心
 ```
 灵感 → 世界观构建(world_view.json, 0-15%) → ⏸世界观审阅(confirm_world_view)
      → 大纲生成(outline.json, 10-25%) → ⏸大纲审阅(confirm_outline)
-     → 并行章节生成(25-60%, Semaphore并发)
-     → 质量评估(60-75%, 并发LLM打分 + rule_checker硬校验)
+     → 并行章节生成(25-60%, Semaphore并发；章数以大纲条数为准，失败章节留待重试)
+     → 质量评估(60-75%, 并发LLM打分 + rule_checker硬校验；失败章节跳过)
      → 修订循环(75-90%, patch协议, 命中率<50%回退全文重写)
-     → 多平台适配(90-100%) → 完成
+     → 多平台适配(90-100%, 适配稿落盘 exports/adaptations/) → 完成
 ```
 
 ### 审阅检查点
@@ -104,11 +122,14 @@ backend/         — FastAPI + Python 核心
 - **大纲审阅**：`outline_review_ready` 事件 → 用户确认后调 `confirm_outline()`（`OutlineReviewDialog`）
 - **续写大纲审阅**：`continuation_outline_ready` 事件 → 用户确认后调 `confirm_continuation()`
 - 三个审阅对话框均提供 **"重新生成"** 按钮（`api.retryWorldView()` / `api.retryOutline()`），不满意可重跑该阶段
+- **关闭 ≠ 放弃**：对话框的"稍后审阅"/ESC/遮罩只把界面收起（`reviewDismissed`），待审阅内容保留；顶部横幅与工作台"等待审阅"按钮可重新打开。确认成功后才清空 `pending*`
 - `_pending_outline` / `_outline_reviewing` / `_pending_resume_outline` 状态管理大纲检查点；`confirm_outline()` 依据 `_pending_resume_outline` 决定走 `_resume_chapter_generation`（补缺失章节）或 `_generate_chapters`（全新生成）
+- **状态回填**：`GET /api/pipeline/state` 返回完整快照（含 `reviewing` / `pending`）。SSE 每次连接建立（含重连）后前端主动拉一次并回填 store——刷新页面不会丢界面状态，也不会出现"停在等待审阅却看不到对话框"
 
 ### 阶段重试
-- 失败阶段记录在 `self._failed_stage`（`_handle_error()` 设置），工作台底部显示错误信息 + **"重试当前阶段"** 按钮
-- `retry_world_view()` / `retry_outline()` / `retry_current_stage()`（`backend/core/pipeline.py`），对应 API `POST /retry-world-view` / `/retry-outline` / `/retry`
+- 失败阶段记录在 `self._failed_stage`（`_handle_error()` 设置，同时把项目 `summary.status` 写成 `failed` + `failed_stage`），工作台底部显示错误信息 + **"重试当前阶段"** 按钮
+- `retry_world_view()` / `retry_outline()` / `retry_chapter_generation()` / `retry_current_stage()`（`backend/core/pipeline.py`），对应 API `POST /retry-world-view` / `/retry-outline` / `/retry`
+- 章节阶段的失败（单章异常、大纲缺章）走 `retry_chapter_generation()`：只补生成缺失章节，不需要从头再来
 - 大纲生成有质量检测：`<30%` 章节含有效剧情（plot_detail ≥20字）视为失败，允许重试
 
 ### 修订机制
@@ -145,13 +166,13 @@ backend/         — FastAPI + Python 核心
 - **注意**：续写大纲生成必须在后台线程执行（`_pipeline_thread`），否则会同步阻塞 HTTP 请求导致前端 30s 超时
 
 ### 项目目录结构
-`projects/<灵感>_<时间戳>/`，含 `world_view.json`、`outline.json`、`summary.json`、`timeline_snapshot.json`、`outline_batch_N.json`、`chapters/chapter_NNN_{meta.json,txt}`、`exports/`
+`projects/<灵感>_<时间戳>/`，含 `world_view.json`、`outline.json`、`summary.json`、`timeline_snapshot.json`、`outline_batch_N.json`、`chapters/chapter_NNN_{meta.json,txt}`、`exports/`（整本导出）与 `exports/adaptations/chapter_NNN_<平台>.md`（多平台适配稿）
 
 ## LLM 集成
 
 **统一使用 Anthropic Messages API 协议**，不绑定具体厂商。用户在设置页填写任意兼容服务的 API Key、Base URL（根地址，SDK 自动追加 `/v1/messages`）和模型名。`backend/core/llm_client.py` 用 `anthropic.Anthropic` 发起请求，同时带 `api_key` 与 `Authorization: Bearer` 头以兼容不同网关。
 
-`LLMClient.chat()` 内置重试：异常时指数退避；**空/过短响应时自动提高 `max_tokens`（×1.5+2000）重试**（截断常因 token 触顶）。`chat_stream()` 有首 token 60 秒停滞警告（只提示不中断）。`initialize()` 每次启动/恢复/续写前重新 `load_config()`，设置页保存后立即生效。
+`LLMClient.chat()` 内置重试：异常时指数退避；**响应短于 `min_length`（默认 50 字）时自动提高 `max_tokens`（×1.5+2000）重试**（截断常因 token 触顶）。连接测试显式传 `min_length=0`，避免一句"连接成功"被当成截断重试 3 次。`chat_stream()` 有首 token 60 秒停滞警告（只提示不中断）。`initialize()` 每次启动/恢复/续写前重新 `load_config()`，设置页保存后立即生效。
 
 依赖仅 `anthropic`（`backend/requirements.txt`），无 openai SDK。
 
@@ -167,16 +188,14 @@ backend/         — FastAPI + Python 核心
 | `api_key` | （空） | LLM API Key |
 | `model` | （空） | 模型名（用户填写） |
 | `base_url` | （空） | Anthropic Messages 兼容服务根地址（用户填写） |
-| `temperature` | 0.8 | 采样温度 |
-| `max_tokens` | 4096 | 单次最大 token |
-| `concurrency` | 3 | 章节并行数 |
-| `max_revision_rounds` | 3 | 最大修订轮数 |
+| `concurrency` | 3 | 章节并行数（1–20） |
+| `max_revision_rounds` | 3 | 最大修订轮数（0–10） |
 | `enable_full_rewrite_fallback` | true | patch 命中率过低时是否整章重写兜底 |
+| `enable_platform_adaptation` | true | 是否执行多平台适配（每章一次大调用，关闭可显著省钱） |
 | `quality_threshold` | 7.0 | 质量通过线（满分10） |
 | `default_chapter_count` | 5 | 默认章节数 |
 | `default_chapter_length` | 3000 | 默认每章字数 |
 | `timeout` | 300 | LLM 调用超时（秒） |
-| `enable_outline_agent` | true | 大纲 Agent 开关 |
 | `outline_max_tokens` | 8192 | 大纲最大 token |
 | `outline_temperature` | 0.7 | 大纲温度 |
 | `budget_max_cost_usd` | 0.0 | 成本上限（美元），0 = 不限制 |
@@ -184,7 +203,9 @@ backend/         — FastAPI + Python 核心
 | `budget_price_output_per_mtok` | 15.0 | 输出单价（美元/百万 token） |
 | `chapter_personas` | （空） | 竞稿人格，每行「名称\|风格描述」 |
 
-前端设置页通过 `GET /api/config` 获取配置（API Key 脱敏返回 `api_key_masked`），`PUT /api/config` 更新配置（白名单过滤字段，api_key 非空才写入）。
+`temperature` / `max_tokens` / `enable_outline_agent` / `web_monitor_port` 是历史字段：从未有任何 Agent 读取（各 Agent 自带温度与预算），设置页对应控件已移除，新配置不再写入这些键。
+
+前端设置页通过 `GET /api/config` 获取配置（API Key 脱敏返回 `api_key_masked`），`PUT /api/config` 更新配置：白名单 + **类型/范围校验**（数值配置非数字或越界返回 422；布尔开关必须是布尔值），api_key 非空才写入。
 
 ## Electron 打包（免安装绿色版）
 
@@ -217,7 +238,7 @@ backend/         — FastAPI + Python 核心
     → `assets/icon.png`（1024）/ `assets/icon.ico`（内嵌 16–256 七档）/ `assets/tray-icon.png`（32，圆形透明）
   - 重做图标时注意：透明图缩放要**预乘 alpha**，否则透明区颜色渗入边缘产生浅色描边
 
-窗口配置：1200×780、最小 900×600、Mac 隐藏 frame / Windows 保留 frame、contextIsolation:true / nodeIntegration:false。系统托盘使用 `assets/tray-icon.png`。
+窗口配置：1200×780、最小 900×600、Mac 隐藏 frame / Windows 保留 frame、contextIsolation:true / nodeIntegration:false。托盘功能（`createTray`）此前从未被调用，已删除；`assets/tray-icon.png` 保留为素材。
 
 ## 设计 Token
 
@@ -449,6 +470,95 @@ backend/         — FastAPI + Python 核心
 
 **验证**：用系统 API（`Icon.ExtractAssociatedIcon`）把 exe 内嵌图标提取出来与 `assets/icon.png` 比对，平均像素差仅 5.6（Electron 默认图标会差很多），确认已生效；应用重新打包后启动、健康检查、数据目录、退出回收后端进程均正常。
 
+### 2026-10-31 深度审计修复（计数 / 续写 / 审阅 / 开销）
+
+36. **章节 worker 计数与实际线程数不一致（会卡死或重复评估）**
+    - 问题：`_pending_chapter_workers` 用"用户请求的章数"初始化，而线程按 `world_view.chapter_outline` 的条数创建。模型被要求写 5 章却返回 3 章时，计数永远归不了零，流水线永久停在章节生成（实测 pending 停在 2、收尾触发 0 次）；返回 6 章时，计数归零后第 5、6 章完成又会各触发一次收尾——评估与适配重复跑（实测触发 3 次）
+    - 修复：计划章数以**大纲条数**为准（并同步 `_chapter_count` / `_total_chapters`），收尾抽成 `_maybe_finalize_chapters()`，用 `_chapters_finalized` + `_evaluation_started` 双重幂等守卫
+    - 文件：`backend/core/pipeline.py`
+
+37. **续写章节缓存键冲突，内存章节表被覆盖（关键）**
+    - 问题：续写用批次内下标 `i` 作 `_chapter_results` 的键，而旧章节占用的正是 0..N-1。10 章后续写 5 章，第 11-15 章直接覆盖第 1-5 章：内存章节表缺章、`total_words` / `chapter_count` 统计错、适配对象错、进度冲到 95%。实测内存章节号为 `[11,12,13,14,15,6,7,8,9,10]`
+    - 修复：缓存键统一用**全书 0 基章号**（`chapter_index - 1`）；进度与总数按全书算（`已有章数 + 本批章数`），`_chapter_completed_count` 从已有章数起算
+    - 文件：`backend/core/pipeline.py`
+
+38. **续写/恢复未清理实例状态，会串上一部作品**
+    - 问题：`continue_from_project` 不加载 `self.outline`、不清 `evaluations/adaptations`。于是新章节拿到的是**上一部小说的角色弧线**（或空），均分把上一部书的评分算进来
+    - 修复：续写/恢复/新建入口统一重置 `outline / _outline_for_chapters / evaluations / adaptations / 章节缓存 / _failed_stage`；续写弧线改取本批大纲（`_generate_continuation_chapters` 显式钉住 `_outline_for_chapters`）；`_finish_pipeline` 的均分只统计本书章节
+    - 文件：`backend/core/pipeline.py`
+
+39. **世界观审阅对话框把生成结果清空（关键，已用真实项目数据验证）**
+    - 问题：`WorldViewReviewDialog.handleConfirm` 是按表单**重建**对象：没做输入框的 `era / location / history` 写成空串、`factions` 写成空数组、每个角色的 `ability` 写成空串。仓库里两个历史项目的 `world_view.json` 全部是 `era='' location='' factions=0 history='' ability=''`——用户点一次"确认"，世界观就被削掉一半，后续大纲/章节 prompt 跟着变差
+    - 修复：改为"以原始对象为基底合并"，只覆盖用户编辑过的字段；同时把 era/location/factions/history 与角色 ability 都做成可编辑项（既然要保留，就别让它们不可见）
+    - 文件：`frontend/src/components/WorldViewReviewDialog.tsx`
+
+40. **项目库卡片永远显示"生成中 / 0 章节 / —"**
+    - 问题：后端 `list_projects` 返回 `{name, path, summary:{...}}`，而前端 `ProjectSummary` 类型与卡片按扁平字段读（`title/status/chapter_count/avg_quality_score/completed_at`），全部取到 `undefined`
+    - 修复：后端把 summary 摊平到顶层（同时保留嵌套字段兼容旧调用），并跳过 `_parse_failures` 这类内部目录
+    - 文件：`backend/core/project_manager.py`、`frontend/src/types/index.ts`
+
+41. **`GET /api/projects/{name}/batches` 调用未定义函数**
+    - 问题：端点到不存在的 `load_batch_outlines`，一旦请求即 NameError；返回的批次结构还是裸元组
+    - 修复：改用 `list_batch_outlines`，返回 `[{batch_number, outline}]`
+    - 文件：`backend/api/projects.py`
+
+42. **续写批次记录从未真正落盘**
+    - 问题：`_finish_pipeline` 先调 `update_project_batches` 写盘，再用更早读取的 `previous_summary` 覆盖整个 `summary.json`——批次记录写进去又被立刻抹掉
+    - 修复：批次信息直接并入本次汇总的 `batches`，完成后清掉 `paused_*` / `failed_*` 残留标记；删除不再使用的 `update_project_batches`
+    - 文件：`backend/core/pipeline.py`、`backend/core/project_manager.py`
+
+43. **多平台适配：每章一次全文调用，结果不落盘**
+    - 问题：`_adapt_chapters` 对每章发一次完整正文的 LLM 调用，结果只进内存 + SSE，不写文件、不进摘要，导出用的仍是原始章节；续写时还会把旧章节全部重新适配一遍
+    - 修复：适配稿落盘到 `exports/adaptations/chapter_NNN_<平台>.md`（正文 + 适配说明）；重跑/续写时跳过已有适配稿；只适配本批新章节；新增 `enable_platform_adaptation` 开关（设置页可关，直接省掉这一阶段）
+    - 文件：`backend/core/pipeline.py`、`backend/core/project_manager.py`、`frontend/src/pages/SettingsTab.tsx`
+
+44. **"前情提要"永远是空的**
+    - 问题：`_generate_chapters` 在建线程时读 `_chapter_results[position-2]`，而全新任务此时该表必为空——`previous_chapter_summary` 从来没进过 prompt
+    - 修复：改为取大纲里上一章的 `plot_detail`（立即可得），续写场景按全书章号取上一章细纲/缓存
+    - 文件：`backend/core/pipeline.py`
+
+45. **章节 prompt 的全局弧线与远章清单**
+    - 问题：`_format_surrounding_chapters` 标题写着"全局弧线结构"却从不输出 `global_arc`；"后续远章"把**前面**的章节也列进去；50 章的书每章 prompt 都塞 46 个标题
+    - 修复：输出三幕结构（setup/confrontation/resolution）+ `core_thread`；前情/后续各限 3 章，其余只报省略数量
+    - 文件：`backend/core/chapter_agent.py`
+
+46. **失败章节仍被送进评估与适配**
+    - 问题：正文是 `[生成失败: ...]` 的章节照样调用一次评估 LLM，把均分拉低；还会被送去"适配"
+    - 修复：评估前排除 `status == "error"` 的章节并提示（全部失败则报错终止）；适配阶段同样跳过；新增 `retry_chapter_generation()`，可只补缺失章节
+    - 文件：`backend/core/pipeline.py`
+
+47. **"测试连接"一次点击发 3 次请求**
+    - 问题：`chat()` 把 `<50 字` 一律当"空/过短响应"提额重试，而连接测试本来只回 4 个字——实测 `calls=3`
+    - 修复：`chat()` 增加 `min_length` 参数，连接测试传 0；空响应时给出明确提示
+    - 文件：`backend/core/llm_client.py`
+
+48. **字数统计把换行/空白也算进去**
+    - 问题：`rule_checker` 用 `len(content)`，长章节能虚高 3%–5%，让"字数达标"判定偏松
+    - 修复：新增 `count_words()` 按非空白字符统计；前端 `word_count` 仍按原始长度展示（两套口径的差异已在文档注明）
+    - 文件：`backend/core/rule_checker.py`
+
+49. **设置页两个死控件 + 配置无校验**
+    - 问题：`Temperature` 与「最大 Token」写进配置后**没有任何 Agent 读取**（各 Agent 自带温度/预算），与已删除的"主题"是同一类死控件；同时 `PUT /api/config` 只做白名单，`concurrency: "abc"` 也能存，随后 `threading.Semaphore("abc")` 在工作线程抛错、流水线无声卡住
+    - 修复：删除两个控件与对应配置键（`temperature` / `max_tokens` / `enable_outline_agent` / `web_monitor_port`）；`PUT /api/config` 增加类型 + 范围校验（422）；新增「多平台适配」「整章重写兜底」两个真实生效的开关
+    - 文件：`frontend/src/pages/SettingsTab.tsx`、`backend/core/config.py`、`backend/api/config.py`
+
+50. **审阅对话框关掉就再也打不开**
+    - 问题：`onClose` 直接清空 store 里的 `pending*`，而后端仍在等待审阅——工作台只显示"等待审阅…"却没有入口，只能停止重来
+    - 修复：区分"收起"（`reviewDismissed`，保留待审内容，横幅/工作台按钮可重开）与"确认"（清空）；新增 `GET /api/pipeline/state` 完整快照，SSE 每次连接建立/重连后回填 store（刷新页面不再丢状态）；`confirm_*` 在流水线已停止时返回 False，API 返回 409，前端能提示"已停止"而不是假装成功
+    - 文件：`frontend/src/App.tsx`、`frontend/src/pages/WorkspaceTab.tsx`、`frontend/src/stores/*`、`backend/api/pipeline.py`、`backend/core/pipeline.py`
+
+51. **预览页世界观几乎空白 / 正文不能选中复制**
+    - 问题：`PreviewTab` 读 `setting / magic_system / char.description`，真实 schema 是 `summary / world_view.rules / char.desc`，所以只显示标题、题材与角色名；全局 `user-select: none` 让正文与日志无法复制
+    - 修复：按真实 schema 渲染简介、世界设定、故事框架、角色（含能力）；正文/日志加 `select-text`
+    - 文件：`frontend/src/pages/PreviewTab.tsx`、`frontend/src/pages/WorkspaceTab.tsx`
+
+52. **失败项目永远显示"生成中"、日志刷屏、死代码**
+    - 问题：`_handle_error` 不改项目状态；`EventBroker` 每个事件打两条 INFO；`createTray` 从未调用；`models/schemas.py`、`run_all_platforms`、`LLMClient.set_connection` 等无人引用；README 仍写 `npm run make`、构建脚本产物路径还是 forge 时代的
+    - 修复：失败时写 `status=failed + failed_stage`（项目卡显示失败态与停在哪一阶段）；事件追踪日志降为 DEBUG；删除死代码（含整个 `backend/models/`、托盘函数）；同步 README / build-portable.bat / 本文件
+    - 文件：`backend/core/pipeline.py`、`backend/api/events.py`、`electron/main.js`、`README.md`、`build-portable.bat`
+
+**验证**：新增 `backend/selftest.py`（标准库 unittest，32 项），覆盖章节计数两种错配、续写键位/总数/弧线、失败章节跳过、适配落盘与跳过、均分口径、批次记录、失败状态、配置校验、短响应重试、字数统计、审阅状态快照、停止后确认被拒绝等；`python selftest.py` 全部通过。前端 `npx tsc --noEmit` 与 `npm run build` 通过。
+
 ## 开发规范
 
 
@@ -464,8 +574,10 @@ backend/         — FastAPI + Python 核心
 | 关注点 | 路径 |
 |---|---|
 | 根构建命令 | `package.json`（含 `config` 字段存 Electron 镜像） |
+| 用户文档（安装/使用/部署） | `README.md` |
 | 前端构建 | `frontend/package.json` |
 | Python 依赖 | `backend/requirements.txt` |
+| 后端自检（unittest） | `backend/selftest.py` |
 | 一键安装 | `install.bat` |
 | 开发启动 | `dev.bat`（顶部 `chcp 65001` 防乱码） |
 | 前端入口 | `frontend/src/main.tsx` |

@@ -19,18 +19,16 @@ DEFAULT_CONFIG = {
     # 服务根地址（客户端会请求 <base_url>/v1/messages）和模型名称。
     "model": "",
     "base_url": "",
-    "temperature": 0.8,
-    "max_tokens": 4096,
     "concurrency": 3,           # 章节并行生成并发数
     "max_revision_rounds": 3,   # 最大修订轮数
     # patch 命中率 <50% 时是否允许整章重写兜底（关闭则保留原文，少花 token）
     "enable_full_rewrite_fallback": True,
+    # 多平台适配阶段：每章一次完整正文的调用。关闭可显著省钱（适配稿是可选的）。
+    "enable_platform_adaptation": True,
     "quality_threshold": 7.0,   # 质量评估通过阈值(满分10)
     "default_chapter_count": 5, # 默认章节数
     "default_chapter_length": 3000,  # 默认每章字数
-    "web_monitor_port": 5000,   # Web监控面板端口
     # ---- 大纲生成 Agent 配置 ----
-    "enable_outline_agent": True,     # 是否启用大纲生成（可在设置页关闭）
     "outline_max_tokens": 8192,       # 大纲生成最大 token
     "outline_temperature": 0.7,       # 大纲生成温度
     # ---- 网络超时 ----

@@ -122,8 +122,12 @@ async def confirm_world_view(body: dict):
         raise HTTPException(status_code=400, detail="缺少世界观数据")
     try:
         pipeline = _get_pipeline()
-        pipeline.confirm_world_view(reviewed)
+        if not pipeline.confirm_world_view(reviewed):
+            raise HTTPException(
+                status_code=409, detail="流水线已停止，无法确认世界观，请重新开始")
         return {"ok": True}
+    except HTTPException:
+        raise
     except (RuntimeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -136,8 +140,12 @@ async def confirm_outline(body: dict):
         raise HTTPException(status_code=400, detail="缺少大纲数据")
     try:
         pipeline = _get_pipeline()
-        pipeline.confirm_outline(reviewed)
+        if not pipeline.confirm_outline(reviewed):
+            raise HTTPException(
+                status_code=409, detail="流水线已停止，无法确认大纲，请重新开始")
         return {"ok": True}
+    except HTTPException:
+        raise
     except (RuntimeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -150,8 +158,12 @@ async def confirm_continuation(body: dict):
         raise HTTPException(status_code=400, detail="缺少大纲数据")
     try:
         pipeline = _get_pipeline()
-        pipeline.confirm_continuation(reviewed)
+        if not pipeline.confirm_continuation(reviewed):
+            raise HTTPException(
+                status_code=409, detail="流水线已停止，无法确认续写大纲，请重新开始")
         return {"ok": True}
+    except HTTPException:
+        raise
     except (RuntimeError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -234,3 +246,14 @@ async def pipeline_status():
         "chapter_count": pipeline._chapter_count,
         "completed_chapters": pipeline._completed_chapters,
     }
+
+
+@router.get("/state")
+async def pipeline_state():
+    """完整状态快照（含章节/评估/待审阅内容）。
+
+    前端刷新页面或 SSE 断线重连后用它回填 store，否则界面会"空了"而后端
+    仍在跑、甚至停在等待审阅。
+    """
+    pipeline = _get_pipeline()
+    return pipeline.get_status()

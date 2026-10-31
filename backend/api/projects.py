@@ -85,7 +85,12 @@ async def get_batches(project_name: str):
     project_dir = _resolve_project_dir(project_name)
     if not project_dir:
         raise HTTPException(status_code=404, detail="项目不存在")
-    return {"batches": load_batch_outlines(project_dir)}
+    # 此前这里调用的是不存在的 load_batch_outlines，端点一旦被请求就 NameError
+    batches = [
+        {"batch_number": number, "outline": outline}
+        for number, outline in list_batch_outlines(project_dir)
+    ]
+    return {"batches": batches}
 
 
 @router.delete("/{project_name:path}")
@@ -139,8 +144,13 @@ async def export_txt(project_name: str):
         output = Path(project_dir) / "exports"
         output.mkdir(exist_ok=True)
         output_path = output / f"{project_name}.txt"
-        export_to_txt(project_dir, str(output_path))
+        # export_to_* 在没有章节时返回 False；此前不检查，接口仍然回 ok=True，
+        # 前端会打开一个不存在的文件。
+        if not export_to_txt(project_dir, str(output_path)):
+            raise HTTPException(status_code=400, detail="项目还没有已完成的章节，无法导出")
         return {"ok": True, "path": str(output_path), "filename": f"{project_name}.txt"}
+    except HTTPException:
+        raise
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 
@@ -155,8 +165,11 @@ async def export_markdown(project_name: str):
         output = Path(project_dir) / "exports"
         output.mkdir(exist_ok=True)
         output_path = output / f"{project_name}.md"
-        export_to_markdown(project_dir, str(output_path))
+        if not export_to_markdown(project_dir, str(output_path)):
+            raise HTTPException(status_code=400, detail="项目还没有已完成的章节，无法导出")
         return {"ok": True, "path": str(output_path), "filename": f"{project_name}.md"}
+    except HTTPException:
+        raise
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"导出失败: {e}")
 

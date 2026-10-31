@@ -145,16 +145,39 @@ export default function WorkspaceTab() {
   const pendingWorldView = useStore((s) => s.pendingWorldView)
   const pendingOutline = useStore((s) => s.pendingOutline)
   const pendingContinuationOutline = useStore((s) => s.pendingContinuationOutline)
+  const showReview = useStore((s) => s.showReview)
   const pipelineError = useStore((s) => s.pipelineError)
   const setPipelineError = useStore((s) => s.setPipelineError)
 
-  const logEndRef = useRef<HTMLDivElement>(null)
+  const logBoxRef = useRef<HTMLDivElement>(null)
+  const stickToBottom = useRef(true)
   const latestLog = logs.length > 0 ? logs[logs.length - 1] : null
 
-  // 自动滚动日志到底部
+  // 自动滚动：用户往上翻看历史时不要把他拽回底部（原先每次日志都强制平滑滚动，
+  // 高频日志下既抢滚动条又卡顿）。
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = logBoxRef.current
+    if (!el || !stickToBottom.current) return
+    el.scrollTop = el.scrollHeight
   }, [logs])
+
+  const handleLogScroll = useCallback(() => {
+    const el = logBoxRef.current
+    if (!el) return
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+  }, [])
+
+  // 待审阅提示：点击可重新打开被收起的对话框
+  const waitingReview: 'world' | 'outline' | 'continuation' | null =
+    pendingWorldView ? 'world'
+      : pendingOutline ? 'outline'
+        : pendingContinuationOutline ? 'continuation'
+          : null
+  const waitingLabel: Record<string, string> = {
+    world: '等待审阅世界观',
+    outline: '等待审阅详细大纲',
+    continuation: '等待审阅续写大纲',
+  }
 
   // 暂停流水线
   const handlePause = useCallback(async () => {
@@ -262,7 +285,11 @@ export default function WorkspaceTab() {
         </div>
 
         {/* 日志内容 */}
-        <div className="flex-1 overflow-y-auto bg-[#1D1D1F] px-4 py-3 min-h-0 font-mono text-xs leading-relaxed">
+        <div
+          ref={logBoxRef}
+          onScroll={handleLogScroll}
+          className="flex-1 overflow-y-auto bg-[#1D1D1F] px-4 py-3 min-h-0 font-mono text-xs leading-relaxed select-text"
+        >
           {logs.length === 0 ? (
             <p className="text-white/30">等待日志...</p>
           ) : (
@@ -278,65 +305,37 @@ export default function WorkspaceTab() {
               </div>
             ))
           )}
-          <div ref={logEndRef} />
         </div>
       </div>
 
       {/* 底部操作区 */}
       <div className="shrink-0 px-8 pb-6">
         {isRunning ? (
-          pendingWorldView ? (
-            <motion.div
+          waitingReview ? (
+            <motion.button
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
+              whileHover={{ scale: 1.01 }}
+              whileTap={{ scale: 0.99 }}
+              onClick={() => showReview(waitingReview)}
+              title="打开审阅对话框"
               className="w-full py-3 rounded-apple-lg border border-apple-blue/40
                 text-apple-blue font-medium bg-apple-blue/5
+                hover:bg-apple-blue/10 transition-colors
                 flex items-center justify-center gap-2"
             >
               <motion.div
                 animate={{ scale: [1, 1.2, 1] }}
                 transition={{ duration: 1.5, repeat: Infinity }}
               >
-                <BookOpen size={16} />
+                {waitingReview === 'world' ? <BookOpen size={16} /> : <PenTool size={16} />}
               </motion.div>
-              <span>等待审阅世界观...</span>
-            </motion.div>
-          ) : pendingOutline ? (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="w-full py-3 rounded-apple-lg border border-apple-success/40
-                text-apple-success font-medium bg-apple-success/5
-                flex items-center justify-center gap-2"
-            >
-              <motion.div
-                animate={{ scale: [1, 1.2, 1] }}
-                transition={{ duration: 1.5, repeat: Infinity }}
-              >
-                <PenTool size={16} />
-              </motion.div>
-              <span>等待审阅详细大纲...</span>
-            </motion.div>
-          ) : pendingContinuationOutline ? (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="w-full py-3 rounded-apple-lg border border-apple-success/40
-                text-apple-success font-medium bg-apple-success/5
-                flex items-center justify-center gap-2"
-            >
-              <motion.div
-                animate={{ scale: [1, 1.2, 1] }}
-                transition={{ duration: 1.5, repeat: Infinity }}
-              >
-                <PenTool size={16} />
-              </motion.div>
-              <span>等待审阅续写大纲...</span>
-            </motion.div>
+              <span>{waitingLabel[waitingReview]} — 点击打开</span>
+            </motion.button>
           ) : (
             <div className="space-y-2">
-              {/* 显示最新日志状态 */}
-              {latestLog && latestLog.message.includes('等待模型响应') && (
+              {/* 长时间等待模型时给个明确提示（日志里"调用模型/生成中"类消息） */}
+              {latestLog && /调用模型|生成中|评估中|修订中|适配第/.test(latestLog.message) && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}

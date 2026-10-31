@@ -363,8 +363,14 @@ function ProjectCard({
     generating: { label: '生成中', color: 'bg-apple-blue/10 text-apple-blue' },
     completed: { label: '已完成', color: 'bg-apple-success/10 text-apple-success' },
     paused: { label: '已暂停', color: 'bg-apple-warning/10 text-apple-warning' },
+    failed: { label: '失败', color: 'bg-apple-error/10 text-apple-error' },
   }
   const statusConfig = statusMap[status] || { label: '生成中', color: 'bg-apple-blue/10 text-apple-blue' }
+  const stageHint = status === 'failed'
+    ? (project.failed_stage ? `停在「${stageLabel(project.failed_stage)}」` : '生成失败')
+    : status === 'paused' && project.paused_stage
+      ? `停在「${stageLabel(project.paused_stage)}」`
+      : ''
 
   return (
     <motion.div
@@ -386,6 +392,10 @@ function ProjectCard({
           {statusConfig.label}
         </span>
       </div>
+
+      {stageHint && (
+        <p className="text-[11px] text-apple-text-muted mb-2 truncate">{stageHint}</p>
+      )}
 
       {/* 统计信息 */}
       <div className="grid grid-cols-3 gap-2 mb-4">
@@ -585,6 +595,21 @@ function ContinuationModal({
 }
 
 /* ===== 工具函数 ===== */
+const STAGE_LABELS: Record<string, string> = {
+  world_building: '世界观构建',
+  outline_generation: '大纲生成',
+  chapter_generation: '章节生成',
+  quality_evaluation: '质量评估',
+  revision: '回流修订',
+  adaptation: '多平台适配',
+  continuation_outline: '续写大纲',
+}
+
+function stageLabel(stage?: string): string {
+  if (!stage) return ''
+  return STAGE_LABELS[stage] || stage
+}
+
 function formatDate(dateStr: string): string {
   try {
     const d = new Date(dateStr)

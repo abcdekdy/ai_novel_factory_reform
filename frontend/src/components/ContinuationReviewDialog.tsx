@@ -1,34 +1,39 @@
 /**
- * 续写大纲审阅对话框 — 全屏 Modal 覆盖层，展示并编辑续写大纲
+ * 续写大纲审阅对话框 — 展示并编辑本批续写大纲，确认后开始生成
  */
-
 import { useEffect, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { X, FileText, ShieldCheck, Save, Sparkles } from 'lucide-react'
 import { api } from '../api/client'
 import type { Outline, OutlineChapter } from '../types'
 
 interface Props {
   outline: Outline
+  /** 收起对话框（内容保留，可从横幅重新打开） */
   onClose: () => void
-}
-
-const overlayVariants = {
-  hidden: { opacity: 0 },
-  visible: { opacity: 1 },
+  /** 已确认并提交，清空待审阅内容 */
+  onConfirmed: () => void
 }
 
 const cardVariants = {
-  hidden: { opacity: 0, scale: 0.92, y: 20 },
-  visible: { opacity: 1, scale: 1, y: 0, transition: { type: 'spring', damping: 25, stiffness: 300 } },
+  hidden: { opacity: 0, scale: 0.94, y: 16 },
+  visible: { opacity: 1, scale: 1, y: 0, transition: { type: 'spring', damping: 26, stiffness: 320 } },
 }
 
-export default function ContinuationReviewDialog({ outline, onClose }: Props) {
+const INPUT_CLASS =
+  'w-full rounded-apple glass-inset px-3 py-2 text-sm text-apple-text ' +
+  'focus:outline-none focus:ring-2 focus:ring-apple-blue/30'
+
+export default function ContinuationReviewDialog({ outline, onClose, onConfirmed }: Props) {
   const [chapters, setChapters] = useState<OutlineChapter[]>(outline.chapters ?? [])
   const consistencyRules = outline.consistency_rules ?? []
   const [saving, setSaving] = useState(false)
 
-  // ESC 关闭
+  const meta = outline.outline_meta ?? {}
+  const rangeText = meta.chapter_start
+    ? `第 ${meta.chapter_start}–${meta.chapter_end ?? meta.chapter_start} 章`
+    : `共 ${chapters.length} 章`
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -37,23 +42,19 @@ export default function ContinuationReviewDialog({ outline, onClose }: Props) {
     return () => window.removeEventListener('keydown', handler)
   }, [onClose])
 
-  const updateChapter = (idx: number, field: keyof OutlineChapter, value: string) => {
-    setChapters(prev => prev.map((ch, i) => (i === idx ? { ...ch, [field]: value } : ch)))
+  const updateChapter = (idx: number, field: 'title' | 'plot_detail', value: string) => {
+    setChapters((prev) => prev.map((ch, i) => (i === idx ? { ...ch, [field]: value } : ch)))
   }
 
   const handleConfirm = async () => {
     setSaving(true)
     try {
       await api.confirmContinuation({
-        outline: {
-          ...outline,
-          chapters,
-          consistency_rules: consistencyRules,
-        },
+        // 必须带上 outline_meta：章节范围、批次号都在里面，丢了后端会 KeyError
+        outline: { ...outline, chapters, consistency_rules: consistencyRules },
       })
-      onClose()
+      onConfirmed()
     } catch (err) {
-      console.error('确认续写大纲失败:', err)
       alert(err instanceof Error ? err.message : '确认失败')
     } finally {
       setSaving(false)
@@ -61,107 +62,117 @@ export default function ContinuationReviewDialog({ outline, onClose }: Props) {
   }
 
   return (
-    <AnimatePresence>
+    <motion.div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      onClick={onClose}
+    >
       <motion.div
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
-        variants={overlayVariants}
+        className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-apple-xl glass-heavy shadow-apple-lg"
+        variants={cardVariants}
         initial="hidden"
         animate="visible"
-        exit="hidden"
-        onClick={onClose}
+        onClick={(e) => e.stopPropagation()}
       >
-        <motion.div
-          className="relative w-full max-w-2xl max-h-[80vh] overflow-y-auto rounded-2xl bg-white shadow-2xl"
-          variants={cardVariants}
-          onClick={e => e.stopPropagation()}
-        >
-          {/* 头部 */}
-          <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 bg-white/90 px-6 py-4 backdrop-blur supports-[backdrop-filter]:bg-white/80">
-            <div className="flex items-center gap-2">
-              <Sparkles className="h-5 w-5 text-blue-500" />
-              <h2 className="text-lg font-semibold text-gray-900">审阅续写大纲</h2>
-            </div>
-            <button
-              onClick={onClose}
-              className="rounded-full p-1.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
-            >
-              <X className="h-5 w-5" />
-            </button>
+        {/* 头部 */}
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-black/5 bg-white/85 px-6 py-4 backdrop-blur">
+          <div className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-apple-blue" />
+            <h2 className="text-lg font-semibold text-apple-text">审阅续写大纲</h2>
+            <span className="text-xs text-apple-text-muted">{rangeText}</span>
           </div>
+          <button
+            onClick={onClose}
+            title="暂时收起，可从顶部横幅重新打开"
+            className="rounded-full p-1.5 text-apple-text-muted transition-colors hover:bg-black/5 hover:text-apple-text"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
 
-          {/* 内容 */}
-          <div className="space-y-6 px-6 py-5">
-            {/* 新批次章节 */}
-            <div>
-              <div className="mb-3 flex items-center gap-1.5 text-sm font-medium text-gray-700">
-                <FileText className="h-4 w-4 text-gray-400" />
-                新批次章节 ({chapters.length})
-              </div>
-              <div className="space-y-3">
-                {chapters.map((ch, idx) => (
-                  <div key={idx} className="rounded-xl border border-gray-100 bg-gray-50/30 p-3">
+        {/* 内容 */}
+        <div className="space-y-6 px-6 py-5">
+          {outline.batch_guidance ? (
+            <div className="rounded-apple border border-apple-blue/20 bg-apple-blue/5 px-4 py-3 text-sm text-apple-text-secondary">
+              <span className="font-medium text-apple-text">续写指引：</span>
+              {String(outline.batch_guidance)}
+            </div>
+          ) : null}
+
+          <div>
+            <div className="mb-3 flex items-center gap-1.5 text-sm font-medium text-apple-text">
+              <FileText size={15} className="text-apple-blue" />
+              新批次章节 <span className="text-xs font-normal text-apple-text-muted">{chapters.length} 章</span>
+            </div>
+            <div className="space-y-3">
+              {chapters.map((ch, idx) => (
+                <div key={idx} className="rounded-apple border border-black/5 bg-black/[0.02] p-3">
+                  <div className="mb-2 flex items-center gap-2">
+                    <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-apple-blue-dim px-1.5 text-xs font-medium text-apple-blue">
+                      {ch.chapter_index ?? idx + 1}
+                    </span>
                     <input
                       type="text"
                       value={ch.title ?? ''}
-                      onChange={e => updateChapter(idx, 'title', e.target.value)}
                       placeholder="章节标题"
-                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
-                    />
-                    <textarea
-                      value={ch.plot_detail ?? ''}
-                      onChange={e => updateChapter(idx, 'plot_detail', e.target.value)}
-                      placeholder="情节详情"
-                      rows={3}
-                      className="mt-2 w-full resize-none rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20"
+                      onChange={(e) => updateChapter(idx, 'title', e.target.value)}
+                      className={`${INPUT_CLASS} font-medium`}
                     />
                   </div>
-                ))}
-                {chapters.length === 0 && (
-                  <p className="text-sm text-gray-400">暂无章节</p>
-                )}
-              </div>
-            </div>
-
-            {/* 一致性规则（只读） */}
-            <div>
-              <div className="mb-3 flex items-center gap-1.5 text-sm font-medium text-gray-700">
-                <ShieldCheck className="h-4 w-4 text-gray-400" />
-                一致性规则
-              </div>
-              {consistencyRules.length > 0 ? (
-                <ul className="space-y-1.5 rounded-xl border border-gray-100 bg-gray-50/30 px-4 py-3">
-                  {consistencyRules.map((rule, idx) => (
-                    <li key={idx} className="flex items-start gap-2 text-sm text-gray-600">
-                      <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-blue-400" />
-                      {rule}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-gray-400">暂无一致性规则</p>
+                  <textarea
+                    value={ch.plot_detail ?? ''}
+                    placeholder="情节详情"
+                    rows={3}
+                    onChange={(e) => updateChapter(idx, 'plot_detail', e.target.value)}
+                    className={`${INPUT_CLASS} resize-none leading-relaxed`}
+                  />
+                </div>
+              ))}
+              {chapters.length === 0 && (
+                <p className="text-sm text-apple-text-muted">暂无章节</p>
               )}
             </div>
           </div>
 
-          {/* 底部按钮 */}
-          <div className="sticky bottom-0 flex items-center justify-end gap-3 border-t border-gray-200 bg-white/90 px-6 py-4 backdrop-blur supports-[backdrop-filter]:bg-white/80">
-            <button
-              onClick={onClose}
-              className="rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 active:scale-[0.98]"
-            >
-              取消
-            </button>
-            <button
-              onClick={handleConfirm}
-              disabled={saving}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-500 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-blue-600 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <Save className="h-4 w-4" />
-              {saving ? '保存中…' : '确认并开始生成'}
-            </button>
+          <div>
+            <div className="mb-3 flex items-center gap-1.5 text-sm font-medium text-apple-text">
+              <ShieldCheck size={15} className="text-apple-blue" />
+              一致性规则（含沿用的旧规则）
+            </div>
+            {consistencyRules.length > 0 ? (
+              <ul className="space-y-1.5 rounded-apple border border-black/5 bg-black/[0.02] px-4 py-3">
+                {consistencyRules.map((rule, idx) => (
+                  <li key={idx} className="flex items-start gap-2 text-sm text-apple-text-secondary">
+                    <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-apple-blue/60" />
+                    {rule}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-apple-text-muted">暂无一致性规则</p>
+            )}
           </div>
-        </motion.div>
+        </div>
+
+        {/* 底部 */}
+        <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-black/5 bg-white/85 px-6 py-4 backdrop-blur">
+          <button
+            onClick={onClose}
+            className="rounded-apple-sm border border-black/10 bg-white/70 px-4 py-2 text-sm font-medium text-apple-text-secondary transition-colors hover:bg-white"
+          >
+            稍后审阅
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={saving}
+            className="inline-flex items-center gap-1.5 rounded-apple-sm bg-apple-blue px-4 py-2 text-sm font-medium text-white shadow-apple transition-colors hover:bg-apple-blue-hover disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Save className="h-4 w-4" />
+            {saving ? '保存中…' : '确认并开始生成'}
+          </button>
+        </div>
       </motion.div>
-    </AnimatePresence>
+    </motion.div>
   )
 }

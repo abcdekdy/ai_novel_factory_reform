@@ -180,6 +180,47 @@ def load_all_chapters_map(project_dir) -> dict:
     return result
 
 
+# ----------------------------------------------------------------------
+#  多平台适配稿落盘
+# ----------------------------------------------------------------------
+def _safe_platform_name(platform: str) -> str:
+    """把平台名变成合法文件名（去掉 Windows 不允许的字符）。"""
+    cleaned = re.sub(r'[\\/:*?"<>|\s]+', "_", (platform or "").strip())
+    return cleaned.strip("_") or "platform"
+
+
+def adaptation_path(project_dir, chapter_index: int, platform: str) -> Path:
+    """适配稿的落盘路径：<project>/exports/adaptations/chapter_001_平台名.md"""
+    return (Path(project_dir) / "exports" / "adaptations"
+            / f"chapter_{int(chapter_index):03d}_{_safe_platform_name(platform)}.md")
+
+
+def adaptation_exists(project_dir, chapter_index: int, platform: str) -> bool:
+    """该章该平台是否已有适配稿（重跑/续写时据此跳过重复调用）。"""
+    try:
+        return adaptation_path(project_dir, chapter_index, platform).is_file()
+    except (TypeError, ValueError):
+        return False
+
+
+def save_adaptation(project_dir, chapter_index: int, platform: str,
+                    result: dict) -> Path:
+    """把一章的适配结果写成 Markdown 文件（正文 + 适配说明）。"""
+    path = adaptation_path(project_dir, chapter_index, platform)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    title = result.get("original_title") or f"第{chapter_index}章"
+    content = result.get("formatted_content") or ""
+    notes = result.get("formatting_notes") or []
+    lines = [f"# {title}（{platform}）", ""]
+    if notes:
+        lines.append("> 适配说明：" + "；".join(str(n) for n in notes if n))
+        lines.append("")
+    lines.append(content)
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
 def load_outline(project_dir) -> dict:
     """加载详细大纲 (outline.json) — project_dir 支持 str 或 Path"""
     path = Path(project_dir) / "outline.json"
@@ -212,32 +253,9 @@ def save_project_summary(project_dir, summary: dict):
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
 
-def fix_project_status(project_dir) -> str:
-    """根据实际进度修正项目状态。返回修正后的状态。
-
-    场景：用户在所有章节完成后点击"暂停"，导致 summary.json 中 status=paused
-    但实际项目已完成。此函数检测这类不一致并修正。
-    """
-    project_dir = Path(project_dir)
-    summary = load_project_summary(project_dir)
-
-    chapters = load_all_chapters(project_dir)
-    total_chapters = len(chapters)
-    expected = summary.get("chapters_count") or summary.get("chapter_count", 0)
-
-    # 已有章节 >= 预期章节，且预期 > 0 → 项目实际已完成
-    if expected > 0 and total_chapters >= expected and summary.get("status") == "paused":
-        summary["status"] = "completed"
-        summary.pop("paused_stage", None)
-        summary["completed_at"] = summary.get(
-            "completed_at", time.strftime("%Y-%m-%d %H:%M:%S"))
-        save_project_summary(project_dir, summary)
-        return "completed"
-
-    return summary.get("status", "generating")
-
 
 def export_to_txt(project_dir, output_path: str) -> bool:
+
     """导出完整小说为单个txt文件 (project_dir 支持 str 或 Path)"""
     world_view = load_world_view(project_dir)
     chapters = load_all_chapters(project_dir)
@@ -302,38 +320,46 @@ def export_to_markdown(project_dir, output_path: str) -> bool:
 
 
 def list_projects() -> list:
-    """列出所有项目。加载时自动修正过时的 paused 状态。"""
+    """列出所有项目。加载时自动修正过时的 paused 状态。
+
+    返回的每一项把 summary.json 的内容**摊平**到顶层（同时保留嵌套的
+    summary 字段以兼容旧调用方）。前端 ProjectSummary 类型一直按扁平字段读，
+    此前嵌套返回导致项目卡永远显示"生成中 / 0 章节 / —"。
+    """
     ensure_projects_dir()
     projects = []
     for d in sorted(PROJECTS_DIR.iterdir(), reverse=True):
-        if d.is_dir():
-            summary_file = d / "summary.json"
-            summary = {}
-            if summary_file.exists():
-                with open(summary_file, "r", encoding="utf-8") as f:
-                    summary = json.load(f)
-                # 自动修正：所有章节已生成但状态为 paused → 改为 completed
-                actual_chapters = len(load_all_chapters(d))
-                expected = summary.get("chapters_count") or summary.get("chapter_count", 0)
-                if (expected > 0 and actual_chapters >= expected
-                        and summary.get("status") == "paused"):
-                    summary["status"] = "completed"
-                    summary.pop("paused_stage", None)
-                    save_project_summary(d, summary)
-            # 如果 summary 为空，尝试从目录内容推断基本信息
-            if not summary:
-                chapters = load_all_chapters(d)
-                wv = load_world_view(d)
-                summary = {
-                    "title": wv.get("title", ""),
-                    "chapter_count": len(chapters),
-                    "status": "generating",
-                }
-            projects.append({
-                "name": d.name,
-                "path": str(d),
-                "summary": summary
-            })
+        # 跳过内部目录（如 _parse_failures），它们不是项目
+        if not d.is_dir() or d.name.startswith("_"):
+            continue
+        summary_file = d / "summary.json"
+        summary = {}
+        if summary_file.exists():
+            with open(summary_file, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            # 自动修正：所有章节已生成但状态为 paused → 改为 completed
+            actual_chapters = len(load_all_chapters(d))
+            expected = summary.get("chapters_count") or summary.get("chapter_count", 0)
+            if (expected > 0 and actual_chapters >= expected
+                    and summary.get("status") == "paused"):
+                summary["status"] = "completed"
+                summary.pop("paused_stage", None)
+                save_project_summary(d, summary)
+        # 如果 summary 为空，尝试从目录内容推断基本信息
+        if not summary:
+            chapters = load_all_chapters(d)
+            wv = load_world_view(d)
+            summary = {
+                "title": wv.get("title", ""),
+                "chapter_count": len(chapters),
+                "status": "generating",
+            }
+        projects.append({
+            **summary,
+            "name": d.name,
+            "path": str(d),
+            "summary": summary,
+        })
     return projects
 
 
@@ -386,19 +412,6 @@ def get_next_batch_number(project_dir) -> int:
     if not batches:
         return 1
     return max(b[0] for b in batches) + 1
-
-
-def update_project_batches(project_dir, batch_info: dict):
-    """往 summary.json 的 batches[] 里追加一条批次记录。"""
-    summary = load_project_summary(project_dir)
-    batches = summary.get("batches", [])
-    if not isinstance(batches, list):
-        batches = []
-    batches.append(batch_info)
-    summary["batches"] = batches
-    # 同步更新总章数与总字数
-    summary["chapters_count"] = summary.get("chapters_count", 0) + batch_info.get("chapter_count", 0)
-    save_project_summary(project_dir, summary)
 
 
 def load_legacy_package(project_dir, recent_n: int = 3) -> dict:

@@ -23,8 +23,6 @@ interface ConfigState {
   api_key_masked: string
   base_url: string
   model: string
-  temperature: number
-  max_tokens: number
   concurrency: number
   max_revision_rounds: number
   quality_threshold: number
@@ -34,14 +32,14 @@ interface ConfigState {
   budget_price_input_per_mtok: number
   budget_price_output_per_mtok: number
   chapter_personas: string
+  enable_platform_adaptation: boolean
+  enable_full_rewrite_fallback: boolean
 }
 
 const DEFAULT_CONFIG: Partial<ConfigState> = {
   api_key: '',
   base_url: '',
-  model: 'LongCat-2.0',
-  temperature: 0.7,
-  max_tokens: 8192,
+  model: '',
   concurrency: 3,
   max_revision_rounds: 3,
   quality_threshold: 7,
@@ -51,6 +49,8 @@ const DEFAULT_CONFIG: Partial<ConfigState> = {
   budget_price_input_per_mtok: 3,
   budget_price_output_per_mtok: 15,
   chapter_personas: '',
+  enable_platform_adaptation: true,
+  enable_full_rewrite_fallback: true,
   api_key_set: false,
   api_key_masked: '',
 }
@@ -90,8 +90,6 @@ export default function SettingsTab() {
         api_key_masked: (data.api_key_masked as string) || '',
         base_url: (data.base_url as string) || '',
         model: (data.model as string) || DEFAULT_CONFIG.model!,
-        temperature: (data.temperature as number) ?? DEFAULT_CONFIG.temperature!,
-        max_tokens: (data.max_tokens as number) ?? DEFAULT_CONFIG.max_tokens!,
         concurrency: (data.concurrency as number) ?? DEFAULT_CONFIG.concurrency!,
         max_revision_rounds: (data.max_revision_rounds as number) ?? DEFAULT_CONFIG.max_revision_rounds!,
         quality_threshold: (data.quality_threshold as number) ?? DEFAULT_CONFIG.quality_threshold!,
@@ -101,6 +99,8 @@ export default function SettingsTab() {
         budget_price_input_per_mtok: (data.budget_price_input_per_mtok as number) ?? DEFAULT_CONFIG.budget_price_input_per_mtok!,
         budget_price_output_per_mtok: (data.budget_price_output_per_mtok as number) ?? DEFAULT_CONFIG.budget_price_output_per_mtok!,
         chapter_personas: (data.chapter_personas as string) || '',
+        enable_platform_adaptation: (data.enable_platform_adaptation as boolean) ?? true,
+        enable_full_rewrite_fallback: (data.enable_full_rewrite_fallback as boolean) ?? true,
       })
     } catch (e) {
       console.error('加载配置失败:', e)
@@ -118,8 +118,6 @@ export default function SettingsTab() {
       const payload: Record<string, unknown> = {
         base_url: config.base_url,
         model: config.model,
-        temperature: config.temperature,
-        max_tokens: config.max_tokens,
         concurrency: config.concurrency,
         max_revision_rounds: config.max_revision_rounds,
         quality_threshold: config.quality_threshold,
@@ -129,6 +127,8 @@ export default function SettingsTab() {
         budget_price_input_per_mtok: config.budget_price_input_per_mtok,
         budget_price_output_per_mtok: config.budget_price_output_per_mtok,
         chapter_personas: config.chapter_personas,
+        enable_platform_adaptation: config.enable_platform_adaptation,
+        enable_full_rewrite_fallback: config.enable_full_rewrite_fallback,
       }
       if (config.api_key) {
         payload.api_key = config.api_key
@@ -290,23 +290,6 @@ export default function SettingsTab() {
             生成参数
           </h2>
 
-          {/* Temperature */}
-          <div>
-            <div className="flex justify-between mb-1.5">
-              <label className="text-sm text-apple-text-secondary">Temperature</label>
-              <span className="text-sm font-medium text-apple-text">{config.temperature.toFixed(1)}</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="2"
-              step="0.1"
-              value={config.temperature}
-              onChange={(e) => setConfig({ ...config, temperature: parseFloat(e.target.value) })}
-              className="w-full accent-apple-blue"
-            />
-          </div>
-
           {/* Quality Threshold */}
           <div>
             <div className="flex justify-between mb-1.5">
@@ -330,20 +313,11 @@ export default function SettingsTab() {
           {/* 数值输入网格 */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm text-apple-text-secondary mb-1.5">最大 Token</label>
-              <input
-                type="number"
-                value={config.max_tokens}
-                onChange={(e) => setConfig({ ...config, max_tokens: parseInt(e.target.value) || 0 })}
-                className="w-full px-3 py-2 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
-              />
-            </div>
-            <div>
               <label className="block text-sm text-apple-text-secondary mb-1.5">并发数</label>
               <input
                 type="number"
                 min="1"
-                max="10"
+                max="20"
                 value={config.concurrency}
                 onChange={(e) => setConfig({ ...config, concurrency: parseInt(e.target.value) || 1 })}
                 className="w-full px-3 py-2 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
@@ -383,6 +357,38 @@ export default function SettingsTab() {
                 className="w-full px-3 py-2 rounded-apple glass-inset text-sm focus:outline-none focus:ring-2 focus:ring-apple-blue/30"
               />
             </div>
+          </div>
+
+          {/* 阶段开关 */}
+          <div className="space-y-2 pt-1">
+            <label className="flex items-start gap-3 rounded-apple bg-black/[0.02] px-3.5 py-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.enable_platform_adaptation}
+                onChange={(e) => setConfig({ ...config, enable_platform_adaptation: e.target.checked })}
+                className="mt-0.5 accent-apple-blue"
+              />
+              <span className="text-sm text-apple-text-secondary">
+                <span className="font-medium text-apple-text">启用多平台适配</span>
+                <span className="block text-xs text-apple-text-muted mt-0.5">
+                  每章额外调用一次模型生成适配稿（落盘到 exports/adaptations/）。关闭可显著节省 token。
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 rounded-apple bg-black/[0.02] px-3.5 py-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.enable_full_rewrite_fallback}
+                onChange={(e) => setConfig({ ...config, enable_full_rewrite_fallback: e.target.checked })}
+                className="mt-0.5 accent-apple-blue"
+              />
+              <span className="text-sm text-apple-text-secondary">
+                <span className="font-medium text-apple-text">patch 命中率过低时整章重写</span>
+                <span className="block text-xs text-apple-text-muted mt-0.5">
+                  关闭后，局部修订锚点大面积落空时保留原文（更省钱，但问题可能残留）。
+                </span>
+              </span>
+            </label>
           </div>
         </motion.section>
 

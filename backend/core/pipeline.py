@@ -29,7 +29,7 @@ from core.project_manager import (
     load_all_chapters_map, load_legacy_package,
     save_batch_outline, load_batch_outline,
     list_batch_outlines, get_next_batch_number,
-    load_all_chapters, update_project_batches,
+    load_all_chapters, adaptation_exists, save_adaptation,
     build_timeline_snapshot, save_timeline_snapshot,
 )
 
@@ -129,6 +129,12 @@ class NovelPipeline:
         self._pending_outline = None          # 待审阅的详细大纲
         self._outline_reviewing = False       # 是否在大纲审阅检查点暂停
         self._pending_resume_outline = None   # 恢复场景：确认大纲后补缺失章节用
+        self._pending_world_view = None       # 待审阅的世界观
+        self._world_view_reviewing = False
+
+        # ---- 章节收尾幂等标记 ----
+        self._chapters_finalized = False      # 所有章节 worker 是否已收尾
+        self._evaluation_started = False      # 是否已进入评估（防止重复触发）
 
         # ---- 续写状态 ----
         self._continuation_outline = None     # 待审阅的续写大纲
@@ -201,6 +207,14 @@ class NovelPipeline:
         self._chapter_results = {}
         self._chapter_completed_count = 0
         self._pending_chapter_workers = 0
+        # 清掉上一部作品残留，避免续写/重跑时串用旧大纲与旧评分
+        self.world_view = None
+        self.outline = None
+        self._outline_for_chapters = None
+        self._failed_stage = None
+        self._chapters_finalized = False
+        self._evaluation_started = False
+        self._continuation_new_indices = None
 
         # 创建项目目录
         safe_name = inspiration[:20] if inspiration else "untitled"
@@ -288,6 +302,16 @@ class NovelPipeline:
         self.current_stage = "outline_generation"
         self.signals.stage_started.emit("大纲生成")
         self.signals.log_signal.emit("Pipeline", "📋 [1.5] 大纲生成Agent 启动...")
+
+        # 世界观没有章节大纲时直接报错。否则这里会"成功"产出一份 0 章大纲，
+        # 用户确认后才在章节生成阶段失败，且错误提示与真正原因（世界观缺大纲）
+        # 毫不相关——重试也只能重试大纲，形成死循环。
+        coarse = world_view.get("chapter_outline") if isinstance(world_view, dict) else None
+        if not isinstance(coarse, list) or not coarse:
+            message = "世界观中没有章节大纲，无法生成详细大纲，请重新生成世界观"
+            self.signals.stage_error.emit("大纲生成", message)
+            self._handle_error(message)
+            return
 
         agent = OutlineBuilderAgent(
             self.llm,
@@ -457,12 +481,25 @@ class NovelPipeline:
             if isinstance(chapter, dict)
         }
 
-        total_needed = self._chapter_count or len(coarse_outline)
+        # 计划章数以**实际大纲条数**为准：world agent 被要求生成 N 章，模型返回
+        # N±1 章很常见。此前这里用的是"用户请求的章数"来初始化待完成 worker 计数，
+        # 而线程却按大纲条数创建——大纲少一章，计数永远归不了零，流水线会永久停在
+        # 章节生成阶段；大纲多一章则会在计数归零后反复触发评估/适配。
+        total_needed = len(coarse_outline)
+        requested = self._chapter_count
+        if requested and requested != total_needed:
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"⚠️ 大纲实际 {total_needed} 章，与请求的 {requested} 章不同，按大纲生成")
+        self._chapter_count = total_needed
+        self._last_chapter_count = total_needed
         self._total_chapters = total_needed
         self._chapter_results = {}
         self._chapter_completed_count = 0
         self._pending_chapter_workers = total_needed
         self._completed_chapters = 0
+        self._chapters_finalized = False
+        self._evaluation_started = False
 
         self.signals.log_signal.emit(
             "Pipeline", f"✍️ [2/5] 并行生成 {total_needed} 章...")
@@ -474,15 +511,19 @@ class NovelPipeline:
 
         for position, outline_entry in enumerate(coarse_outline, start=1):
             chapter_index = self._get_chapter_index(outline_entry, position)
-            # _chapter_results 键为 0 基位置（第 N 章存键 N-1），前章是键 position-2
-            previous = self._chapter_results.get(position - 2, {})
+            # 生成全部章节时所有线程同时启动，上一章此时还没落盘——所以"前情提要"
+            # 只能取**大纲**里上一章的细纲，取 _chapter_results 永远是空串。
+            previous = outline_detail_map.get(chapter_index - 1, {})
+            if not previous and position >= 2:
+                previous = coarse_outline[position - 2]
             outline_chapter = outline_detail_map.get(chapter_index, {})
             input_data = {
                 "world_view": self.world_view,
                 "chapter_outline": outline_entry,
                 "chapter_index": chapter_index,
                 "target_length": target_length,
-                "previous_chapter_summary": previous.get("summary", ""),
+                "previous_chapter_summary": (previous.get("plot_detail")
+                                             or previous.get("summary", "")),
                 "outline_chapter": outline_chapter,
                 "outline_context": outline_context,
                 "character_arcs": self.outline.get("character_arcs", {}) if self.outline else {},
@@ -675,7 +716,7 @@ class NovelPipeline:
                     "Pipeline", f"⚠️ 第{chapter_index}章保存失败: {e}")
 
         total = max(self._total_chapters, 1)
-        pct = int((self._chapter_completed_count / total) * 100)
+        pct = min(100, int((self._chapter_completed_count / total) * 100))
         self.signals.overall_progress.emit(25 + int(pct * 0.35))  # 章节阶段 25%-60%
         self.signals.chapter_progress.emit(chapter_index, 100, "完成")
 
@@ -684,11 +725,27 @@ class NovelPipeline:
             f"✅ 第{chapter_index}章完成 ({chapter.get('word_count', 0)}字)，"
             f"{self._chapter_completed_count}/{total}")
 
-        if self._pending_chapter_workers <= 0:
-            self._on_all_chapters_complete()
+        self._maybe_finalize_chapters()
+
+    def _maybe_finalize_chapters(self):
+        """所有章节都已完成时进入评估——且**只进入一次**。
+
+        收尾必须幂等：worker 计数一旦与实际线程数不一致（历史上就出现过），
+        或续写批次与旧章节混在同一张表里，非幂等的收尾会重复触发评估与适配，
+        把 token 成倍烧掉。
+        """
+        if self._pending_chapter_workers > 0:
+            return
+        if getattr(self, "_chapters_finalized", False):
+            return
+        self._chapters_finalized = True
+        self._on_all_chapters_complete()
 
     def _on_all_chapters_complete(self):
         """所有章节生成完成，进入质量评估。"""
+        if getattr(self, "_evaluation_started", False):
+            return
+        self._evaluation_started = True
         if self._finalize_pause_if_requested():
             return
         self.signals.stage_completed.emit("章节生成")
@@ -714,7 +771,21 @@ class NovelPipeline:
             chapters_to_eval = [c for c in self.chapters
                                 if c.get("chapter_index") in self._continuation_new_indices]
         else:
-            chapters_to_eval = self.chapters
+            chapters_to_eval = list(self.chapters)
+
+        # 生成失败的章节正文是 "[生成失败: ...]" 这样的占位串，送去评估只会
+        # 白烧一次调用、并让均分被 0 分拉低。直接排除，并在收尾时提示用户。
+        failed_chapters = [c for c in chapters_to_eval if c.get("status") == "error"]
+        if failed_chapters:
+            chapters_to_eval = [c for c in chapters_to_eval if c.get("status") != "error"]
+            self.signals.log_signal.emit(
+                "Pipeline",
+                f"⚠️ {len(failed_chapters)} 章生成失败，跳过质量评估："
+                + "、".join(f"第{c.get('chapter_index')}章" for c in failed_chapters))
+
+        if not chapters_to_eval:
+            self._handle_error("全部章节生成失败，请检查模型配置后重试当前阶段")
+            return
 
         total_to_eval = len(chapters_to_eval)
         concurrency = max(1, int(self.config.get("concurrency", 3)))
@@ -1270,23 +1341,59 @@ class NovelPipeline:
             self._adapt_chapters()
 
     def _adapt_chapters(self):
-        """Step 5: 多平台适配"""
+        """Step 5: 多平台适配
+
+        适配结果此前只存在内存里：每章一次完整正文的 LLM 调用，跑完就丢，
+        导出用的仍是原始章节。现在按章落盘到 exports/adaptations/，并在重跑时
+        跳过已适配的章节——续写时也只适配本批新章节，不重复烧旧章的 token。
+        """
         if self._finalize_pause_if_requested():
             return
         self.current_stage = "adaptation"
         self.signals.stage_started.emit("多平台适配")
+
+        if not self.config.get("enable_platform_adaptation", True):
+            self.signals.log_signal.emit(
+                "Pipeline", "📱 多平台适配已在设置中关闭，跳过此阶段")
+            self.signals.stage_completed.emit("多平台适配")
+            self._finish_pipeline()
+            return
+
         self.signals.log_signal.emit("Pipeline", "📱 [5/5] 多平台适配Agent 启动...")
+
+        # 生成失败的章节没有可适配的正文；续写场景只适配本批新章节。
+        targets = [c for c in self.chapters
+                   if c.get("status") != "error" and (c.get("content") or "").strip()]
+        if getattr(self, "_continuation_new_indices", None):
+            targets = [c for c in targets
+                       if c.get("chapter_index") in self._continuation_new_indices]
+
+        if not targets:
+            self.signals.log_signal.emit("Pipeline", "没有需要适配的章节，跳过")
+            self.signals.stage_completed.emit("多平台适配")
+            self._finish_pipeline()
+            return
 
         agent = PlatformAdapterAgent(self.llm)
         agent.log_signal.connect(lambda name, msg: self.signals.log_signal.emit(name, msg))
 
         platform = "通用网文格式"
         adapted_count = 0
+        skipped = 0
 
-        for chapter in self.chapters:
+        for done, chapter in enumerate(targets, start=1):
             if self._finalize_pause_if_requested():
                 return
             chapter_index = chapter.get("chapter_index", 0)
+
+            if self.project_dir and adaptation_exists(
+                    self.project_dir, chapter_index, platform):
+                skipped += 1
+                self.signals.log_signal.emit(
+                    "Pipeline", f"第{chapter_index}章已适配过，跳过")
+                self.signals.overall_progress.emit(90 + int(done / len(targets) * 10))
+                continue
+
             self.signals.log_signal.emit("Pipeline", f"适配第{chapter_index}章...")
 
             try:
@@ -1297,21 +1404,37 @@ class NovelPipeline:
                     "platform": platform
                 })
 
-                self.adaptations[chapter_index] = result
-                self.signals.adaptation_ready.emit(result)
-                adapted_count += 1
+                if result.get("error"):
+                    self.signals.log_signal.emit(
+                        "Pipeline", f"⚠️ 第{chapter_index}章适配失败: {result['error']}")
+                else:
+                    self.adaptations[chapter_index] = result
+                    if self.project_dir:
+                        try:
+                            path = save_adaptation(
+                                self.project_dir, chapter_index, platform, result)
+                            self.signals.log_signal.emit(
+                                "Pipeline", f"第{chapter_index}章适配稿已保存: {path.name}")
+                        except Exception as e:
+                            self.signals.log_signal.emit(
+                                "Pipeline", f"⚠️ 第{chapter_index}章适配稿保存失败: {e}")
+                    self.signals.adaptation_ready.emit(result)
+                    adapted_count += 1
 
             except Exception as e:
-                self.signals.log_signal.emit("Pipeline", f"⚠️ 第{chapter_index}章适配异常: {e}")
+                self.signals.log_signal.emit(
+                    "Pipeline", f"⚠️ 第{chapter_index}章适配异常: {e}")
 
-            overall = 90 + int(((adapted_count) / len(self.chapters)) * 10)
-            self.signals.overall_progress.emit(overall)
+            self.signals.overall_progress.emit(90 + int(done / len(targets) * 10))
 
         if self._finalize_pause_if_requested():
             return
 
         self.signals.stage_completed.emit("多平台适配")
-        self.signals.log_signal.emit("Pipeline", f"✅ 适配完成（{adapted_count}章）")
+        self.signals.log_signal.emit(
+            "Pipeline",
+            f"✅ 适配完成（新适配 {adapted_count} 章"
+            + (f"，跳过已完成 {skipped} 章" if skipped else "") + "）")
         self._finish_pipeline()
 
     def _finish_pipeline(self):
@@ -1323,31 +1446,33 @@ class NovelPipeline:
         total_words = sum(c.get("word_count", 0) for c in self.chapters)
         total_count = len(self.chapters)
 
-        avg_score = 0
-        if self.evaluations:
-            scores = [e.get("overall_score", 0) for e in self.evaluations.values()]
-            avg_score = sum(scores) / len(scores) if scores else 0
+        # 均分只统计本次书稿的章节：self.evaluations 是实例级字典，续写/恢复时
+        # 若不清空会把上一部作品的评分算进来（入口处已清，这里再兜一层）。
+        current_indices = {c.get("chapter_index") for c in self.chapters}
+        scores = [e.get("overall_score", 0)
+                  for idx, e in self.evaluations.items()
+                  if idx in current_indices]
+        avg_score = sum(scores) / len(scores) if scores else 0
 
         previous_summary = (
             load_project_summary(self.project_dir) if self.project_dir else {})
 
-        is_continuation = (hasattr(self, "_continuation_new_indices")
-                           and self._continuation_new_indices)
+        is_continuation = bool(getattr(self, "_continuation_new_indices", None))
+        batches = list(previous_summary.get("batches") or [])
         if is_continuation:
-            batch_info = {
+            # 直接写进本次汇总。此前是先调 update_project_batches 落盘，再用
+            # 更早读取的 previous_summary 覆盖整个 summary.json——批次记录写进去
+            # 又被立刻抹掉，历史批次从来没真正保存过。
+            batches.append({
                 "batch_number": self._continuation_batch,
                 "guidance": self._continuation_guidance,
                 "chapter_range": (f"{self._continuation_new_indices[0]}-"
                                   f"{self._continuation_new_indices[-1]}"),
                 "chapter_count": len(self._continuation_new_indices),
                 "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            update_project_batches(self.project_dir, batch_info)
+            })
 
-        if is_continuation:
-            status = "generating"
-        else:
-            status = "completed"
+        status = "generating" if is_continuation else "completed"
 
         summary = {
             **previous_summary,
@@ -1359,8 +1484,12 @@ class NovelPipeline:
             "project_dir": str(self.project_dir) if self.project_dir else "",
             "status": status,
             "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "batches": batches,
             **self._cost_summary(),
         }
+        # 完成后清掉上次暂停/失败的残留标记，否则项目卡会一直显示"已暂停"
+        for stale in ("paused_stage", "paused_at", "failed_stage", "failed_at"):
+            summary.pop(stale, None)
 
         if self.project_dir:
             save_project_summary(self.project_dir, summary)
@@ -1512,11 +1641,39 @@ class NovelPipeline:
         self.is_running = False
         self.signals.stage_error.emit(self.current_stage, message)
         self.signals.log_signal.emit("Pipeline", f"❌ {message}")
+
+        # 把失败写进项目摘要。否则失败的半成品会永远显示"生成中"，
+        # 项目库里看不出哪些项目根本没跑完。
+        if self.project_dir:
+            try:
+                summary = load_project_summary(self.project_dir)
+                summary.update({
+                    "status": "failed",
+                    "failed_stage": self.current_stage,
+                    "failed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "error": message,
+                })
+                save_project_summary(self.project_dir, summary)
+            except Exception:
+                pass
+
         self.signals.pipeline_finished.emit({"error": message, "stage": self.current_stage})
 
     def stop(self):
-        """停止流水线（尽力而为）"""
+        """停止流水线（尽力而为）
+
+        必须把审阅标志一并清掉：否则用户点"停止"后再点审阅对话框的"确认"，
+        confirm_* 里 "not is_running and not reviewing" 的守卫会失效，
+        已经停掉的流水线又被推着往前走。
+        """
         self.is_running = False
+        self._world_view_reviewing = False
+        self._outline_reviewing = False
+        self._pending_world_view = None
+        self._pending_outline = None
+        self._continuation_outline = None
+        self._pending_resume_outline = None
+        self._pause_requested = False
         self.signals.log_signal.emit("Pipeline", "⏹ 流水线已手动停止")
 
     # ===== 阶段重试 =====
@@ -1566,10 +1723,48 @@ class NovelPipeline:
             return self.retry_world_view()
         elif stage in ("outline_generation",):
             return self.retry_outline()
+        elif stage in ("chapter_generation",):
+            # 章节阶段的失败通常是单章模型调用异常或"世界观缺大纲"。
+            # 这里补生成缺失章节即可，不必让用户从头开始。
+            return self.retry_chapter_generation()
         else:
             self.signals.log_signal.emit(
                 "Pipeline", f"⚠️ 阶段 '{stage}' 不支持重试，请重新开始流水线")
             return False
+
+    def retry_chapter_generation(self):
+        """补生成缺失/失败的章节（章节生成阶段失败后的重试入口）。"""
+        if not self.world_view:
+            self.signals.log_signal.emit(
+                "Pipeline", "⚠️ 无法重试：缺少世界观数据")
+            return False
+        if not self.outline:
+            # 没有详细大纲时先补大纲，确认后再继续章节生成
+            return self.retry_outline()
+
+        self._failed_stage = None
+        self.is_running = True
+        self.signals.log_signal.emit("Pipeline", "🔄 重试章节生成（仅补缺失章节）...")
+
+        existing = {}
+        if self.project_dir:
+            existing = {
+                index: chapter
+                for index, chapter in load_all_chapters_map(self.project_dir).items()
+                if chapter.get("status") != "error"
+            }
+
+        import threading
+
+        def _worker():
+            try:
+                self._resume_chapter_generation(existing)
+            except Exception as e:
+                self._handle_error(f"重试章节生成异常: {e}")
+
+        self._pipeline_thread = threading.Thread(target=_worker, daemon=True)
+        self._pipeline_thread.start()
+        return True
 
 
 
@@ -1613,6 +1808,12 @@ class NovelPipeline:
                         f"world_view={'有' if self.world_view else '无'}, "
                         f"outline={'有' if self.outline else '无'}, "
                         f"existing={len(existing)} 章")
+        if not self.world_view:
+            self._handle_error("缺少世界观数据，无法继续生成章节")
+            return
+        if not getattr(self, "_chapter_length", None):
+            self._chapter_length = self.config.get("default_chapter_length", 3000)
+        self._outline_for_chapters = self._outline_for_chapters or self.outline
         coarse_outline = self.world_view.get("chapter_outline", [])
         total_needed = len(coarse_outline)
         outline_chapters = self.outline.get("chapters", []) if self.outline else []
@@ -1645,10 +1846,13 @@ class NovelPipeline:
         self._chapter_completed_count = len(self._chapter_results)
         self._completed_chapters = self._chapter_completed_count
         self._pending_chapter_workers = len(missing)
+        self._chapters_finalized = False
+        self._evaluation_started = False
 
         if not missing:
             self.signals.log_signal.emit(
                 "Pipeline", f"✅ 项目全部 {total_needed} 章均已生成，继续后续处理")
+            self._chapters_finalized = True
             self._on_all_chapters_complete()
             return
 
@@ -1721,6 +1925,14 @@ class NovelPipeline:
         self.project_dir = project_dir
         self.world_view = world_view
         self.outline = outline
+        self._outline_for_chapters = outline or None
+        # 清掉上一次运行残留：评分/适配/失败阶段都不应跨项目继承
+        self.evaluations = {}
+        self.adaptations = {}
+        self._failed_stage = None
+        self._continuation_new_indices = None
+        self._chapters_finalized = False
+        self._evaluation_started = False
         saved_length = project_summary.get("chapter_length")
         try:
             self._chapter_length = int(saved_length)
@@ -1806,6 +2018,21 @@ class NovelPipeline:
         self.world_view = world_view
         self._chapter_length = chapter_length
         self._continuation_guidance = guidance
+        # 上一部作品（或上一次运行）的状态必须清干净：评分不清会把旧书的分数
+        # 算进本书均分；大纲不清会让本批章节拿到别的书的角色弧线。
+        self.outline = load_outline(project_dir)
+        self._outline_for_chapters = None
+        self.evaluations = {}
+        self.adaptations = {}
+        self.chapters = []
+        self._chapter_results = {}
+        self._chapter_completed_count = 0
+        self._completed_chapters = 0
+        self._pending_chapter_workers = 0
+        self._continuation_new_indices = None
+        self._chapters_finalized = False
+        self._evaluation_started = False
+        self._failed_stage = None
 
         # 加载遗产包
         legacy = load_legacy_package(project_dir)
@@ -1888,12 +2115,12 @@ class NovelPipeline:
 
     def confirm_world_view(self, reviewed_world_view: dict):
         """
-        用户在 WorldViewReviewDialog 审阅确认后调用。
+        用户在 WorldViewReviewDialog 审阅确认后调用。返回是否被接受。
         """
         if not self.is_running and not getattr(self, "_world_view_reviewing", False):
             self.signals.log_signal.emit(
                 "Pipeline", "⚠️ 流水线已停止，无法确认世界观")
-            return
+            return False
 
         self.world_view = reviewed_world_view
         self._pending_world_view = None
@@ -1913,7 +2140,7 @@ class NovelPipeline:
             "Pipeline", f"▶️ 用户确认世界观《{title}》，启动大纲生成...")
 
         if self._finalize_pause_if_requested():
-            return
+            return True
         import threading
         self._pipeline_thread = threading.Thread(
             target=self._build_outline,
@@ -1921,16 +2148,17 @@ class NovelPipeline:
             daemon=True,
         )
         self._pipeline_thread.start()
+        return True
 
     def confirm_outline(self, reviewed_outline: dict):
         """
         用户在 OutlineReviewDialog 审阅确认后调用。
-        用审阅过的大纲开始章节生成。
+        用审阅过的大纲开始章节生成。返回是否被接受。
         """
         if not self.is_running and not getattr(self, "_outline_reviewing", False):
             self.signals.log_signal.emit(
                 "Pipeline", "⚠️ 流水线已停止，无法确认大纲")
-            return
+            return False
 
         self.outline = reviewed_outline
         # 评估与修订读的是 _outline_for_chapters（优先于 self.outline）。主流程
@@ -1955,7 +2183,7 @@ class NovelPipeline:
             "Pipeline", f"▶️ 用户确认大纲（{ch_count} 章），开始生成章节...")
 
         if self._finalize_pause_if_requested():
-            return
+            return True
         import threading
         if self._pending_resume_outline:
             # 恢复场景：只补缺失章节
@@ -1973,14 +2201,15 @@ class NovelPipeline:
                 daemon=True,
             )
         self._pipeline_thread.start()
+        return True
 
     def confirm_continuation(self, reviewed_outline: dict):
         """
-        用户审阅确认后，用审阅过的大纲开始生成章节。
+        用户审阅确认后，用审阅过的大纲开始生成章节。返回是否被接受。
         """
         if not self.is_running:
             self.signals.log_signal.emit("Pipeline", "⚠️ 流水线已停止，无法启动章节生成")
-            return
+            return False
 
         # 兜底：审阅回传可能丢失 outline_meta（含章节范围），从已落盘的批次大纲恢复，
         # 否则后续 _generate_continuation_chapters 直接下标访问会抛 KeyError
@@ -2019,15 +2248,19 @@ class NovelPipeline:
         self._pipeline_thread = threading.Thread(
             target=_run_chapters, daemon=True)
         self._pipeline_thread.start()
+        return True
 
     def _generate_continuation_chapters(self, outline: dict):
         """用审阅后的续写大纲并行生成章节。"""
         self.current_stage = "chapter_generation"
+        # 本批大纲是本章节的唯一依据：评估（_chapter_outline_for）、重评与
+        # 角色弧线都读 _outline_for_chapters，在这里显式钉住，避免依赖调用方。
+        self._outline_for_chapters = outline
         self.signals.stage_started.emit("章节生成")
 
         meta = outline.get("outline_meta") or {}
         batch_start = meta.get("chapter_start", 1)
-        chapter_count = meta.get("total_chapters", 0)
+        chapter_count = meta.get("total_chapters", 0) or len(outline.get("chapters", []))
         existing_count = batch_start - 1
 
         self.signals.log_signal.emit(
@@ -2038,10 +2271,12 @@ class NovelPipeline:
         outline_detail_map = {
             ch.get("chapter_index"): ch
             for ch in outline.get("chapters", [])
+            if isinstance(ch, dict)
         }
 
         existing_chapters = load_all_chapters_map(self.project_dir)
         self._merge_existing_chapters(existing_chapters)
+        existing_count = len([i for i in existing_chapters if isinstance(i, int)])
         self._continuation_old_count = existing_count
         self._continuation_new_indices = list(range(batch_start, batch_start + chapter_count))
 
@@ -2049,17 +2284,31 @@ class NovelPipeline:
         concurrency = self.config.get("concurrency", 3)
         self._semaphore = threading.Semaphore(concurrency)
         self._chapter_lock = threading.Lock()
-        self._total_chapters = chapter_count
+        # 进度与章数按**全书**算：旧章节已经在内存里，若只看本批章数，
+        # 完成第一章时进度就会冲到 200% 以上、日志显示 "11/5"。
+        self._total_chapters = existing_count + chapter_count
+        self._chapter_count = existing_count + chapter_count
         self._pending_chapter_workers = chapter_count
-        self._completed_chapters = 0
+        self._chapter_completed_count = existing_count
+        self._completed_chapters = existing_count
+        self._chapters_finalized = False
+        self._evaluation_started = False
+
+        active_outline = self._active_outline() or outline
+        character_arcs = active_outline.get("character_arcs", {}) or {}
 
         for i, outline_entry in enumerate(outline.get("chapters", [])):
             chapter_index = outline_entry.get("chapter_index", batch_start + i)
 
             prev_summary = ""
-            if i > 0 and (i - 1) in self._chapter_results:
-                prev_summary = self._chapter_results[i - 1].get("summary", "")
-            elif existing_count > 0:
+            prev_detail = outline_detail_map.get(chapter_index - 1, {})
+            prev_summary = (prev_detail.get("plot_detail")
+                            or prev_detail.get("summary", ""))
+            if not prev_summary:
+                # _chapter_results 的键是 0 基缓存键（章号 - 1），上一章即 chapter_index - 2
+                prev_chapter = self._chapter_results.get(chapter_index - 2, {})
+                prev_summary = prev_chapter.get("summary", "")
+            if not prev_summary and existing_count > 0:
                 legacy_recent = self._continuation_legacy.get(
                     "recent_chapters", []) if self._continuation_legacy else []
                 if legacy_recent:
@@ -2075,29 +2324,28 @@ class NovelPipeline:
                 "previous_chapter_summary": prev_summary,
                 "outline_chapter": outline_ch,
                 "outline_context": outline_context,
-                "character_arcs": self.outline.get("character_arcs", {}) if self.outline else {}
+                # 用本批大纲的弧线（含本批追加的轨迹点）；self.outline 是全书
+                # 旧大纲，续写入口没加载它时会退化成空，甚至会串到上一部作品。
+                "character_arcs": character_arcs,
             }
             threading.Thread(
                 target=self._gen_chapter_worker,
-                args=(i, input_data),
+                # 缓存键必须用**全书 0 基章号**：用批次内下标 i 会覆盖旧章节的键，
+                # 导致内存中的章节表缺章、统计与适配对象全错。
+                args=(chapter_index - 1, input_data),
                 daemon=True,
             ).start()
 
-    def discard_world_view(self):
-        """用户取消世界观审阅时调用 — 取消本次生成，回到空闲。"""
-        self.is_running = False
-        self.current_stage = "idle"
-        self._pending_world_view = None
-        self._world_view_reviewing = False
-        self.world_view = None
-        self.signals.log_signal.emit(
-            "Pipeline", "❌ 用户取消世界观审阅，本次生成已取消")
-
     def get_status(self) -> dict:
-        """获取当前流水线状态（供Web面板轮询）"""
+        """获取当前流水线状态（供 Web 面板轮询 / 前端重连回填）"""
+        continuation_pending = (
+            getattr(self, "_continuation_outline", None)
+            if self.current_stage == "continuation_outline" else None
+        )
         return {
             "is_running": self.is_running,
             "current_stage": self.current_stage,
+            "failed_stage": self._failed_stage,
             "total_chapters": self._chapter_count,
             "completed_chapters": self._completed_chapters,
             "world_view": self.world_view,
@@ -2105,7 +2353,19 @@ class NovelPipeline:
             "chapters": self.chapters,
             "evaluations": {str(k): v for k, v in self.evaluations.items()},
             "adaptations_count": len(self.adaptations),
-            "project_dir": str(self.project_dir) if self.project_dir else None
+            "project_dir": str(self.project_dir) if self.project_dir else None,
+            # 审阅中/待审阅内容。前端刷新、SSE 断线重连后靠它把对话框恢复出来，
+            # 否则流水线会一直停在"等待审阅"，而界面再也不知道在等什么。
+            "reviewing": {
+                "world": bool(getattr(self, "_world_view_reviewing", False)),
+                "outline": bool(getattr(self, "_outline_reviewing", False)),
+                "continuation": bool(continuation_pending),
+            },
+            "pending": {
+                "world": getattr(self, "_pending_world_view", None),
+                "outline": getattr(self, "_pending_outline", None),
+                "continuation": continuation_pending,
+            },
         }
 
     def export_txt(self, output_path: str) -> bool:

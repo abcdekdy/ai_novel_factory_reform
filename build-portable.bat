@@ -11,7 +11,7 @@ echo ========================================
 echo   AI 小说工厂 - 免安装绿色版构建
 echo ========================================
 echo.
-echo 产物：out\make\zip\win32\x64\ 下的 zip
+echo 产物：out\AI小说工厂-win32-x64\ 与同名 zip
 echo 解压后双击 ai-novel-factory.exe 即可运行，无需安装 Python。
 echo.
 

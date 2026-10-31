@@ -129,8 +129,21 @@ def check_chapter(content: str, context: dict) -> dict:
 _HARD_RATIO = 0.30   # 偏离目标超 30% 直接 fail
 _SOFT_RATIO = 0.15   # 偏离 15%~30% 标记为 soft
 
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def count_words(content: str) -> int:
+    """统计正文字数。
+
+    用 len() 会把换行与缩进也算进去，长章节能虚高 3%~5%，让"字数达标"的判定
+    偏松。这里统一按**非空白字符**计（中文按字、英文按字符），与用户对
+    "字"的直觉一致。
+    """
+    return len(_WHITESPACE_RE.sub("", content or ""))
+
+
 def _check_word_count(content: str, target: int) -> dict:
-    actual = len(content)
+    actual = count_words(content)
     ratio = abs(actual - target) / target if target > 0 else 0.0
     hard, soft = [], []
 

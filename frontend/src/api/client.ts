@@ -1,9 +1,11 @@
 /**
  * API 客户端 — 封装所有后端 REST 调用
  */
-import type { ProjectSummary } from '../types'
+import type { ChapterMeta, PipelineStateSnapshot, ProjectSummary } from '../types'
 
-const BASE_URL = 'http://127.0.0.1:8765'
+export const BASE_URL = 'http://127.0.0.1:8765'
+export const SSE_URL = `${BASE_URL}/api/events/stream`
+
 const DEFAULT_TIMEOUT = 30000 // 30 秒默认超时
 
 async function request<T>(path: string, options?: RequestInit, timeout = DEFAULT_TIMEOUT): Promise<T> {
@@ -71,6 +73,10 @@ export const api = {
   pipelineStatus: () =>
     request<{ is_running: boolean; current_stage: string; project_dir: string | null }>('/api/pipeline/status'),
 
+  /** 完整状态快照：刷新/重连后回填 store */
+  pipelineState: () =>
+    request<PipelineStateSnapshot>('/api/pipeline/state', {}, 60000),
+
   // 项目管理
   listProjects: () =>
     request<{ projects: ProjectSummary[] }>('/api/projects'),
@@ -85,7 +91,7 @@ export const api = {
     request<Record<string, unknown>>(`/api/projects/${encodeURIComponent(name)}/outline`),
 
   getChapters: (name: string) =>
-    request<Record<string, unknown>>(`/api/projects/${encodeURIComponent(name)}/chapters`),
+    request<ChapterMeta[]>(`/api/projects/${encodeURIComponent(name)}/chapters`),
 
   exportTxt: (name: string) =>
     request<{ ok: boolean; path: string }>(`/api/projects/${encodeURIComponent(name)}/export/txt`, { method: 'POST' }),

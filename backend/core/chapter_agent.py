@@ -127,9 +127,10 @@ class ChapterGeneratorAgent(BaseAgent):
         chars_present = outline_ch.get("characters_present", [])
         arcs_text = self._format_arcs_for_chapter(character_arcs, chars_present, chapter_index)
 
-        # ---- 整体走向（前后章节） ----
+        # ---- 整体走向（前后章节 + 全局弧线） ----
         all_summaries = outline_ctx.get("all_chapters_summary", [])
-        past_future_text = self._format_surrounding_chapters(all_summaries, chapter_index)
+        past_future_text = self._format_surrounding_chapters(
+            all_summaries, chapter_index, outline_ctx.get("global_arc", {}))
 
         # ---- 伏笔 ----
         foreshadowing = outline_ch.get("foreshadowing", [])
@@ -271,36 +272,79 @@ class ChapterGeneratorAgent(BaseAgent):
                 lines.append(f"  - {name}（{arc_type}）：{state}")
         return "\n".join(lines) if lines else "  （本章无需追踪弧线）"
 
-    def _format_surrounding_chapters(self, all_summaries: list, chapter_index: int) -> str:
-        """生成前后章节走向（加总全局弧线 + 邻近章节的标题/概要）"""
+    def _format_surrounding_chapters(self, all_summaries: list, chapter_index: int,
+                                     global_arc: dict | None = None) -> str:
+        """生成全局弧线 + 前后各 3 章的走向摘要。
+
+        旧实现有三个毛病：① 标题写着"全局弧线结构"却从不输出 global_arc；
+        ② "后续远章"把**前面**的章节也一并列出；③ 50 章的书每章 prompt 都
+        塞进 46 个标题，白白消耗上下文。现在只给三段结构 + 前后各 3 章。
+        """
         if not all_summaries:
             return "  （暂无整体走向信息）"
-        lines = []
-        lines.append("全局弧线结构：")
 
-        # 找 global_arc（可能在 context 外层，这里只打印邻近章节）
+        lines: list[str] = []
+
+        # ---- 全局三幕结构 / 核心线索 ----
+        arc = global_arc if isinstance(global_arc, dict) else {}
+        acts = arc.get("three_act_structure") if isinstance(arc, dict) else None
+        if isinstance(acts, dict) and acts:
+            lines.append("全局弧线结构：")
+            for key, label in (("setup", "开端"), ("confrontation", "发展"),
+                               ("resolution", "收尾")):
+                info = acts.get(key)
+                if not isinstance(info, dict):
+                    continue
+                chapters = info.get("chapters") or []
+                purpose = str(info.get("purpose", "") or "")
+                chapter_text = "/".join(str(c) for c in chapters) if chapters else "?"
+                if purpose or chapters:
+                    lines.append(f"  {label}（第{chapter_text}章）：{purpose}")
+        core_thread = arc.get("core_thread") if isinstance(arc, dict) else ""
+        if core_thread:
+            lines.append(f"  核心线索：{core_thread}")
+
+        # ---- 前后各 3 章 ----
+        indexed = {}
         for ch in all_summaries:
             idx = ch.get("chapter_index")
-            if idx is None:
-                continue
-            marker = " ⬅️ 当前" if idx == chapter_index else ""
-            if abs(idx - chapter_index) <= 3 or idx == chapter_index:
-                plot = ch.get("plot_detail", "")
-                if len(plot) > 60:
-                    plot = plot[:60] + "..."
-                lines.append(f"  第{idx}章「{ch.get('title', '')}」{marker}")
-                lines.append(f"    {plot}")
+            if idx is not None:
+                indexed[idx] = ch
 
-        # 远邻只给标题
-        far = [ch for ch in all_summaries
-               if ch.get("chapter_index") is not None
-               and abs(ch.get("chapter_index") - chapter_index) > 3]
-        if far:
-            far_titles = " → ".join(f"第{ch.get('chapter_index')}「{ch.get('title', '')}’"
-                                     for ch in far)
-            lines.append(f"  后续远章：{far_titles}")
+        ordered = sorted(indexed)
+        prev_indices = [i for i in ordered if i < chapter_index][-3:]
+        next_indices = [i for i in ordered if i > chapter_index][:3]
+        omitted_prev = len([i for i in ordered if i < chapter_index]) - len(prev_indices)
+        omitted_next = len([i for i in ordered if i > chapter_index]) - len(next_indices)
 
-        return "\n".join(lines)
+        def _describe(idx: int, marker: str = "") -> str:
+            ch = indexed.get(idx, {})
+            plot = ch.get("plot_detail", "")
+            if len(plot) > 80:
+                plot = plot[:80] + "..."
+            return f"  第{idx}章「{ch.get('title', '')}」{marker}\n    {plot}"
+
+        if prev_indices:
+            lines.append(
+                f"前情（已写 {len([i for i in ordered if i < chapter_index])} 章，"
+                f"这里给最近 {len(prev_indices)} 章）：")
+            if omitted_prev > 0:
+                lines.append(f"  更早的 {omitted_prev} 章已省略")
+            for idx in prev_indices:
+                lines.append(_describe(idx))
+
+        if chapter_index in indexed:
+            lines.append("当前章：")
+            lines.append(_describe(chapter_index, " ⬅️ 当前"))
+
+        if next_indices:
+            lines.append(f"后续走向（最近 {len(next_indices)} 章）：")
+            for idx in next_indices:
+                lines.append(_describe(idx))
+            if omitted_next > 0:
+                lines.append(f"  更远的 {omitted_next} 章已省略")
+
+        return "\n".join(lines) if lines else "  （暂无整体走向信息）"
 
     @staticmethod
     def _format_list(items: list) -> str:

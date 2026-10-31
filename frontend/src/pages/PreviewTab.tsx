@@ -230,6 +230,13 @@ function EmptyState({ onBrowseProjects }: { onBrowseProjects: () => void }) {
 
 /* ===== 世界观视图 ===== */
 function WorldViewContent({ data }: { data: WorldView }) {
+  const detail = data.world_view ?? {}
+  const framework = data.story_framework ?? {}
+  const characters = data.characters ?? []
+  const summary = data.summary || data.setting || ''
+  const rules = detail.rules || data.magic_system || ''
+  const factions = Array.isArray(detail.factions) ? detail.factions.filter(Boolean) : []
+
   return (
     <div className="max-w-3xl space-y-6">
       {/* 标题区 */}
@@ -249,55 +256,107 @@ function WorldViewContent({ data }: { data: WorldView }) {
             )}
           </div>
         </div>
-        {data.setting && (
-          <p className="text-sm text-apple-text-secondary leading-relaxed">{data.setting}</p>
+        {summary ? (
+          <p className="text-sm text-apple-text-secondary leading-relaxed whitespace-pre-wrap select-text">
+            {summary}
+          </p>
+        ) : (
+          <p className="text-sm text-apple-text-muted">暂无世界观简介</p>
         )}
       </div>
 
+      {/* 世界设定 */}
+      {(detail.era || detail.location || rules || factions.length > 0 || detail.history) && (
+        <div className="glass-card rounded-apple-lg p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <Globe size={18} className="text-apple-blue" />
+            <h3 className="font-semibold text-apple-text">世界设定</h3>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {detail.era && <InfoItem label="时代背景" value={detail.era} />}
+            {detail.location && <InfoItem label="地理设定" value={detail.location} />}
+            {factions.length > 0 && <InfoItem label="主要势力" value={factions.join('、')} />}
+            {detail.history && <InfoItem label="历史背景" value={detail.history} />}
+          </div>
+          {rules && (
+            <div>
+              <div className="flex items-center gap-1.5 text-xs font-medium text-apple-text-muted mb-1.5">
+                <Wand2 size={13} />
+                世界规则 / 力量体系
+              </div>
+              <p className="text-sm text-apple-text-secondary leading-relaxed whitespace-pre-wrap select-text">
+                {rules}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 故事框架 */}
+      {(framework.premise || framework.conflict || framework.climax || framework.ending_type) && (
+        <div className="glass-card rounded-apple-lg p-6">
+          <div className="flex items-center gap-2 mb-4">
+            <ListTree size={18} className="text-apple-blue" />
+            <h3 className="font-semibold text-apple-text">故事框架</h3>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {framework.premise && <InfoItem label="故事开端" value={framework.premise} />}
+            {framework.conflict && <InfoItem label="核心冲突" value={framework.conflict} />}
+            {framework.climax && <InfoItem label="高潮设计" value={framework.climax} />}
+            {framework.ending_type && <InfoItem label="结局方向" value={framework.ending_type} />}
+          </div>
+        </div>
+      )}
+
       {/* 角色列表 */}
-      {data.characters && data.characters.length > 0 && (
+      {characters.length > 0 && (
         <div className="glass-card rounded-apple-lg p-6">
           <div className="flex items-center gap-2 mb-4">
             <Users size={18} className="text-apple-blue" />
             <h3 className="font-semibold text-apple-text">角色</h3>
-            <span className="text-xs text-apple-text-muted">{data.characters.length} 个</span>
+            <span className="text-xs text-apple-text-muted">{characters.length} 个</span>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {data.characters.map((char, idx) => (
+            {characters.map((char, idx) => (
               <motion.div
                 key={char.name + idx}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: idx * 0.05 }}
+                transition={{ delay: Math.min(idx, 8) * 0.04 }}
                 className="p-3 rounded-apple bg-black/[0.03] border border-black/[0.04]"
               >
-                <div className="font-medium text-apple-text text-sm">{char.name}</div>
-                {char.role && (
-                  <div className="text-xs text-apple-blue mt-0.5">{char.role}</div>
-                )}
-                {char.description && (
-                  <div className="text-xs text-apple-text-secondary mt-1.5 leading-relaxed line-clamp-2">
-                    {char.description}
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-apple-text text-sm">{char.name}</span>
+                  {char.role && (
+                    <span className="text-[11px] text-apple-blue px-1.5 py-0.5 rounded-full bg-apple-blue-dim">
+                      {char.role}
+                    </span>
+                  )}
+                </div>
+                {(char.desc || char.description) && (
+                  <div className="text-xs text-apple-text-secondary mt-1.5 leading-relaxed select-text">
+                    {char.desc || char.description}
                   </div>
+                )}
+                {char.ability && (
+                  <div className="text-xs text-apple-text-muted mt-1.5">能力：{char.ability}</div>
                 )}
               </motion.div>
             ))}
           </div>
         </div>
       )}
+    </div>
+  )
+}
 
-      {/* 魔法/力量体系 */}
-      {data.magic_system && (
-        <div className="glass-card rounded-apple-lg p-6">
-          <div className="flex items-center gap-2 mb-3">
-            <Wand2 size={18} className="text-apple-blue" />
-            <h3 className="font-semibold text-apple-text">力量体系</h3>
-          </div>
-          <p className="text-sm text-apple-text-secondary leading-relaxed whitespace-pre-wrap">
-            {data.magic_system}
-          </p>
-        </div>
-      )}
+function InfoItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-xs font-medium text-apple-text-muted mb-1">{label}</div>
+      <div className="text-sm text-apple-text-secondary leading-relaxed whitespace-pre-wrap select-text">
+        {value}
+      </div>
     </div>
   )
 }
@@ -462,8 +521,8 @@ function ChaptersContent({
                 </div>
               </div>
 
-              {/* 章节正文 */}
-              <div className="text-sm text-apple-text leading-[1.85] whitespace-pre-wrap">
+              {/* 章节正文（可选中复制） */}
+              <div className="text-sm text-apple-text leading-[1.85] whitespace-pre-wrap select-text">
                 {current.content || '（本章暂无内容）'}
               </div>
 

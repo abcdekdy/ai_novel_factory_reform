@@ -1,6 +1,6 @@
 {
   "name": "ai-novel-factory",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "AI 小说工厂 - Electron + React + FastAPI 重构版",
   "main": "electron/main.js",
   "config": {

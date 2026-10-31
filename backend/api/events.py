@@ -69,7 +69,9 @@ class EventBroker:
         # 快照队列列表，避免迭代时列表被修改
         with self._lock:
             queues = list(self._queues)
-        logger.info(f"[EventBroker] publish: {event}, queues={len(queues)}")  # DEBUG
+        # 每个事件都打一条 INFO 会把 stderr 刷满（Electron 侧还要按行转发），
+        # 排查用的追踪信息放到 DEBUG 级别。
+        logger.debug("[EventBroker] publish: %s, queues=%d", event, len(queues))
         for q in queues:
             # 线程安全：把 put 调度回 asyncio 事件循环
             def _put(queue=q, p=payload):
@@ -106,7 +108,7 @@ async def event_stream():
             while True:
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=30)
-                    logger.info(f"[SSE] sending: {payload['event']}")  # DEBUG
+                    logger.debug("[SSE] sending: %s", payload["event"])
                     yield {
                         "event": payload["event"],
                         "data": json.dumps(payload["data"], ensure_ascii=False),
