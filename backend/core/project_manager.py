@@ -253,9 +253,7 @@ def save_project_summary(project_dir, summary: dict):
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
 
-
 def export_to_txt(project_dir, output_path: str) -> bool:
-
     """导出完整小说为单个txt文件 (project_dir 支持 str 或 Path)"""
     world_view = load_world_view(project_dir)
     chapters = load_all_chapters(project_dir)

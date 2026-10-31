@@ -147,7 +147,7 @@ pip install pyinstaller
 
 ### 5.1 使用免安装绿色版（推荐）
 
-1. 从 GitHub Releases 或构建产物中获取 `AI小说工厂-win32-x64.zip`
+1. 获取 `AI小说工厂-win32-x64.zip`：从 GitHub Releases 下载（若已发布绿色版），或按 [第 8 节](#8-构建与部署) 自行构建
 2. 解压到任意可写目录（**不要放 C:\Program Files 等只读目录**）
 3. 双击 `ai-novel-factory.exe`
 4. 首次启动会自动在 exe 同级创建 `data/`，并拉起本地后端（约 1–3 秒）
