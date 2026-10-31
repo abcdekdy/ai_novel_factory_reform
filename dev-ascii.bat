@@ -15,7 +15,7 @@ rem ============================================================
 
 set "SRC=%~dp0"
 if "%SRC:~-1%"=="\" set "SRC=%SRC:~0,-1%"
-set "DST=%LOCALAPPDATA%\AINovelFactoryDev"
+set "DST=%USERPROFILE%\AI-Novel-Factory-Dev"
 
 echo 正在同步项目到纯英文目录：
 echo   %DST%

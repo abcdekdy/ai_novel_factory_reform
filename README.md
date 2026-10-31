@@ -147,7 +147,7 @@ pip install pyinstaller
 
 ### 5.1 使用免安装绿色版（推荐）
 
-> **路径必须是纯英文！** Electron 在包含中文、全角字符（如 `（` `）`）的路径下会在初始化阶段崩溃，表现为双击后完全没反应。请把程序放到类似 `C:\AINovelFactory` 或 `D:\AI-Novel-Factory` 的目录，不要放在 `桌面\小说生成助手（新版）\...` 这类路径下。
+> **路径必须是纯英文！** Electron 在包含中文、全角字符（如 `（` `）`）的路径下会在初始化阶段崩溃，表现为双击后完全没反应。请把程序放到类似 `桌面\AI-Novel-Factory`、`C:\AINovelFactory` 或 `D:\AI-Novel-Factory` 的目录，不要放在 `桌面\小说生成助手（新版）\...` 这类路径下。
 
 1. 获取 `AI-Novel-Factory-win32-x64.zip`：从 GitHub Releases 下载（若已发布绿色版），或按 [第 8 节](#8-构建与部署) 自行构建
 2. 解压到**纯英文且可写**的目录（例如 `C:\AI-Novel-Factory`；**不要**放 `C:\Program Files` 等只读目录）
@@ -158,7 +158,7 @@ pip install pyinstaller
 > 升级时替换 `ai-novel-factory.exe` 与 `resources/`，**保留 `data/`** 即可保留配置与作品。
 > 整个文件夹可以整体搬移，数据跟着走。
 >
-> 如果从源码目录启动：双击根目录的 `启动绿色版.bat`，它会把绿色版同步到纯英文目录 `%LOCALAPPDATA%\AINovelFactory\app` 再启动，避免中文路径问题。
+> 如果从源码目录启动：双击根目录的 `启动绿色版.bat`，它会把绿色版同步到**桌面上的 `AI-Novel-Factory` 文件夹**（纯英文、容易找到）再启动，避免中文路径问题。
 
 ### 5.2 源码安装与开发模式
 
@@ -191,7 +191,7 @@ cd ..
 npm run dev
 ```
 
-> **开发模式的路径要求**：`dev.bat` 会从项目当前路径启动 Electron，因此项目路径同样必须是纯英文。如果项目在中文目录（例如 `桌面\小说生成助手（新版）`），请改用根目录的 `dev-ascii.bat`：它会把项目同步到 `%LOCALAPPDATA%\AINovelFactoryDev`（纯英文）后运行，配置与作品仍指向原项目 `backend\`。
+> **开发模式的路径要求**：`dev.bat` 会从项目当前路径启动 Electron，因此项目路径同样必须是纯英文。如果项目在中文目录（例如 `桌面\小说生成助手（新版）`），请改用根目录的 `dev-ascii.bat`：它会把项目同步到 `%USERPROFILE%\AI-Novel-Factory-Dev`（纯英文、用户目录下容易找到）后运行，配置与作品仍指向原项目 `backend\`。
 
 `npm run dev` 会并行启动三个进程：
 
@@ -407,7 +407,7 @@ dev-ascii.bat
 npm run dev
 ```
 
-- **项目路径必须是纯英文**：Electron 从含中文/全角字符的路径启动会直接崩溃；`dev-ascii.bat` 会先把项目镜像到 `%LOCALAPPDATA%\AINovelFactoryDev` 再启动，并通过 `NOVEL_DATA_DIR` 继续使用原项目的配置与作品
+- **项目路径必须是纯英文**：Electron 从含中文/全角字符的路径启动会直接崩溃；`dev-ascii.bat` 会先把项目镜像到 `%USERPROFILE%\AI-Novel-Factory-Dev` 再启动，并通过 `NOVEL_DATA_DIR` 继续使用原项目的配置与作品
 - 后端端口固定 `8765`，前端 Vite 固定 `5173`（均在代码中硬编码）
 - Electron 会先等 `/api/health` 通过再开窗；若 30 秒内未就绪会弹中文排查提示
 - 关闭窗口时 Electron 会回收 Python 后端（开发模式还会清理占用 5173 的进程）
@@ -461,7 +461,7 @@ npm run build
 
 **Q1. 双击 exe 完全没反应 / 窗口一闪而过**
 
-**先检查路径**：程序所在路径是否包含中文或全角字符（例如 `桌面\小说生成助手（新版）`）。Electron 在这种路径下会在初始化阶段崩溃（Windows 事件查看器里是 `0x80000003` / BEX64），且不会弹窗。把整个绿色版目录移动到纯英文路径（如 `C:\AI-Novel-Factory`）后重试；从源码目录可直接双击 `启动绿色版.bat`。
+**先检查路径**：程序所在路径是否包含中文或全角字符（例如 `桌面\小说生成助手（新版）`）。Electron 在这种路径下会在初始化阶段崩溃（Windows 事件查看器里是 `0x80000003` / BEX64），且不会弹窗。把整个绿色版目录移动到纯英文路径（如 `桌面\AI-Novel-Factory`）后重试；从源码目录可直接双击 `启动绿色版.bat`。
 
 如果路径是纯英文仍打不开：
 

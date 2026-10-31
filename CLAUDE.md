@@ -15,7 +15,7 @@ install.bat
 # 开发模式（同时启动 Vite 前端 + Electron，Python 后端由 Electron 管理）
 dev.bat
 # 项目路径含中文/全角字符时，Electron 无法启动；改用：
-#   dev-ascii.bat  （镜像到 %LOCALAPPDATA%\AINovelFactoryDev 后运行）
+#   dev-ascii.bat  （镜像到 %USERPROFILE%\AI-Novel-Factory-Dev 后运行）
 
 # 或手动分终端启动：
 # 终端 1: cd frontend && npm run dev
@@ -218,7 +218,7 @@ backend/         — FastAPI + Python 核心
 `out/AI-Novel-Factory-win32-x64/` 与同名 zip。解压后双击 `ai-novel-factory.exe` 即可运行，
 **终端用户无需安装 Python**。
 
-> **路径必须纯 ASCII**：Electron 在包含中文/全角字符的路径下启动会崩溃（STATUS_BREAKPOINT，双击无反应）。因此绿色版目录名固定为 `AI-Novel-Factory-win32-x64`，且要求用户解压到纯英文目录。源码目录若含中文，用 `启动绿色版.bat`（同步到 `%LOCALAPPDATA%\AINovelFactory\app` 后启动）或 `dev-ascii.bat`（同步项目后跑 dev）。
+> **路径必须纯 ASCII**：Electron 在包含中文/全角字符的路径下启动会崩溃（STATUS_BREAKPOINT，双击无反应）。因此绿色版目录名固定为 `AI-Novel-Factory-win32-x64`，且要求用户解压到纯英文目录。源码目录若含中文，用 `启动绿色版.bat`（同步到**桌面** `AI-Novel-Factory` 后启动）或 `dev-ascii.bat`（镜像到 `%USERPROFILE%\AI-Novel-Factory-Dev` 后跑 dev）。
 
 三步流程与各自职责：
 
@@ -572,8 +572,9 @@ backend/         — FastAPI + Python 核心
     - 现象：双击绿色版无窗口、无报错；`dev.bat` 同样打不开。任务计划程序运行 exe 的 `Last Result` 为 `-2147483645`（`0x80000003`，STATUS_BREAKPOINT）；事件日志无应用错误。
     - 排查：`electron.exe --version` 返回 `0x80000003`；`--no-sandbox --version` 可正常输出；最小 Electron 应用在项目路径下 `app.whenReady` 不触发。把同一份 Electron 32/44 二进制与最小应用复制到 `%TEMP%\aitest`（纯 ASCII）后立即正常（ wrote ok.txt），**确认与 Electron 版本无关，是路径问题**。`subst` 映射盘符、目录 junction 都会被解析回中文真实路径，无效。
     - 根因：Electron/Chromium 在包含中文与全角括号（`小说生成助手（新版）`）的路径下初始化崩溃。
-    - 修复：① 绿色版组装目录名改为纯 ASCII `AI-Novel-Factory-win32-x64`（`package_portable.py`），避免解压后目录自带中文；② 新增 `启动绿色版.bat`：把 `out` 同步到 `%LOCALAPPDATA%\AINovelFactory\app`（纯英文）后启动，保留 `data/`；③ 新增 `dev-ascii.bat`：把项目镜像到 `%LOCALAPPDATA%\AINovelFactoryDev` 后运行 `dev.bat`，并用 `NOVEL_DATA_DIR` 继续使用原项目的配置/作品；④ README/CLAUDE 明确“路径必须纯英文”，解压与开发均按此校验。
-    - 验证：在 `%LOCALAPPDATA%\AINovelFactory\app` 启动新构建，窗口标题“AI 小说工厂”、自带后端 `/api/health` 返回 2.2.1、`config.json` 与 2 个历史项目可见；桌面快捷方式可正常打开。
+    - 修复：① 绿色版组装目录名改为纯 ASCII `AI-Novel-Factory-win32-x64`（`package_portable.py`），避免解压后目录自带中文；② 新增 `启动绿色版.bat`：把 `out` 同步到**桌面上的 `AI-Novel-Factory`**（纯英文、容易找到）后启动，保留 `data/`；③ 新增 `dev-ascii.bat`：把项目镜像到 `%USERPROFILE%\AI-Novel-Factory-Dev` 后运行 `dev.bat`，并用 `NOVEL_DATA_DIR` 继续使用原项目的配置/作品；④ README/CLAUDE 明确“路径必须纯英文”，解压与开发均按此校验。
+    - 后续调整（按用户反馈）：安装位置从 `%LOCALAPPDATA%\AINovelFactory\app` 改为桌面 `AI-Novel-Factory`，并在文件夹内附 `使用说明.txt`；开发镜像从 `%LOCALAPPDATA%\AINovelFactoryDev` 改为 `%USERPROFILE%\AI-Novel-Factory-Dev`，避免"藏在 AppData 里找不到"。
+    - 验证：在桌面 `AI-Novel-Factory` 启动新构建，窗口标题“AI 小说工厂”、自带后端 `/api/health` 返回 2.2.1、`config.json` 与 2 个历史项目可见；桌面快捷方式可正常打开。
     - 文件：`package_portable.py`、`启动绿色版.bat`（新增）、`dev-ascii.bat`（新增）、`build-portable.bat`、`README.md`、`CLAUDE.md`
 
 ## 开发规范

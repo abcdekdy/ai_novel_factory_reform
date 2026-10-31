@@ -26,7 +26,10 @@ if not exist "%SRC%\ai-novel-factory.exe" (
     exit /b 1
 )
 
-set "DST=%LOCALAPPDATA%\AINovelFactory\app"
+rem 安装到桌面上容易找到的英文目录：<桌面>\AI-Novel-Factory
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP_DIR=%%D"
+if not defined DESKTOP_DIR set "DESKTOP_DIR=%USERPROFILE%\Desktop"
+set "DST=%DESKTOP_DIR%\AI-Novel-Factory"
 if not exist "%DST%" mkdir "%DST%" >nul 2>&1
 
 rem 应用运行时文件被占用，先提示关闭
@@ -37,6 +40,7 @@ if not errorlevel 1 (
     timeout /t 2 /nobreak >nul
 )
 
+echo 安装位置：%DST%
 echo 正在同步程序文件到纯英文目录...
 robocopy "%SRC%" "%DST%" /E /XO /XD "%SRC%\data" /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 (
